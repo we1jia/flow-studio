@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+outputs/
+
+# 全局 gitignore 忽略了 README.md，本仓库需要提交它
+!README.md
