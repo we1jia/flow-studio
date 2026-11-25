@@ -2,7 +2,7 @@
 
 ## gflow-cli
 
-`flow_studio.py` 中生图直连部分的请求线格式与回包解析移植自 gflow-cli（提交 `6eadc3d`，v0.106.0）：
+`skills/flow-studio/flow_studio.py` 中生图直连部分的请求线格式与回包解析移植自 gflow-cli（提交 `6eadc3d`，v0.106.0）：
 
 - `src/gflow_cli/api/transports/frame_builder.py`（`build_ogiz0b_body`）
 - `src/gflow_cli/api/transports/batchexecute.py`（`_wrb_rows` / `parse_frames` / `RpcError`）

@@ -3,7 +3,7 @@ from pathlib import Path
 import unittest
 
 
-MODULE_PATH = Path(__file__).parents[1] / "ego_lite_window_guard.py"
+MODULE_PATH = Path(__file__).parents[1] / "skills" / "flow-studio" / "ego_lite_window_guard.py"
 SPEC = importlib.util.spec_from_file_location("ego_lite_window_guard", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

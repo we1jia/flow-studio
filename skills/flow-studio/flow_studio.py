@@ -35,6 +35,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 GUARD_SCRIPT = SCRIPT_DIR / "ego_lite_window_guard.py"
 # 本工具建的 Task Space 都以此开头；守卫只复用同前缀空间，其他 Agent 的空间列为禁止触碰
 SPACE_PREFIX = "flow studio"
+# 每个进程独有的空间名前缀（冒号防止 #12 误配 #123）：只复用本进程建的 Space，
+# 不会接手别的会话或 Agent 同时在跑、或刚结束的 flow_studio Space
+RUN_SPACE_PREFIX = f"{SPACE_PREFIX} #{os.getpid()}:"
+__version__ = "0.2.0"
 STATE_FILE = Path.home() / ".cache" / "flow_studio" / "state.json"
 # 输出目录：环境变量 FLOW_STUDIO_OUT_DIR 优先，否则为当前工作目录下的 outputs/flow_studio
 DEFAULT_OUT_DIR = Path(os.environ.get("FLOW_STUDIO_OUT_DIR") or Path.cwd() / "outputs" / "flow_studio").expanduser()
@@ -128,7 +132,7 @@ def save_state(patch: dict[str, Any]) -> None:
 
 def check_guard_or_fail() -> dict[str, Any]:
     """执行 Ego Lite 窗口守卫检查；若遇到阻断状态则直接抛出异常。"""
-    state = window_guard.collect_state(space_prefix=SPACE_PREFIX)
+    state = window_guard.collect_state(space_prefix=RUN_SPACE_PREFIX)
     action = state.get("action", "stop_probe_failed")
     if action.startswith("stop_"):
         raise RuntimeError(f"Ego Lite 窗口守卫阻断（{action}）：{state.get('reason', '')}")
@@ -193,7 +197,7 @@ const page = task.page("p1");
 
 def build_credits_js(guard_state: dict[str, Any]) -> str:
     """构建查询 Google Flow 剩余点数与账号状态的 Node.js 脚本。"""
-    bootstrap = build_space_bootstrap_js(guard_state, "flow studio credits")
+    bootstrap = build_space_bootstrap_js(guard_state, f"{RUN_SPACE_PREFIX} credits")
     return f"""
 const RESULT_MARKER = {json.dumps(RESULT_MARKER)};
 {bootstrap}
@@ -525,7 +529,7 @@ async function ensureProject() {
 
 def build_generate_js(guard_state: dict[str, Any], cfg: dict[str, Any]) -> str:
     """构建执行生图或生视频并自动下载原件的 Node.js 脚本。"""
-    bootstrap = build_space_bootstrap_js(guard_state, f"flow studio {cfg['mode']}")
+    bootstrap = build_space_bootstrap_js(guard_state, f"{RUN_SPACE_PREFIX} {cfg['mode']}")
     cfg_json = json.dumps(cfg, ensure_ascii=False)
     return f"""
 const fs = await import("node:fs/promises");
@@ -1194,6 +1198,17 @@ async function downloadNewItems(newItems, mode, outDir, prefix) {{
   return saved;
 }}
 
+async function uiLanguage() {{
+  try {{
+    return await page.evaluate(() => ({{
+      lang: document.documentElement.lang || "",
+      zhLabels: [...document.querySelectorAll("[aria-label]")].filter(e => /[一-龥]/.test(e.getAttribute("aria-label") || "")).length,
+    }}));
+  }} catch (_) {{
+    return null;
+  }}
+}}
+
 let payload = {{ ok: false }};
 try {{
   const projectUrl = await ensureProject();
@@ -1368,14 +1383,20 @@ try {{
   }}
 }} catch (err) {{
   const msg = String(err && err.stack ? err.stack : err);
-  payload = {{
-    ok: false,
-    error: msg.includes("NOT_LOGGED_IN:") ? "not_logged_in"
-      : msg.includes("FRAME_BIND_FAILED:") ? "frame_bind_failed"
-      : msg.includes("RESULT_PICK_MISMATCH:") ? "result_pick_mismatch"
-      : "runtime_error",
-    message: msg,
-  }};
+  let error = msg.includes("NOT_LOGGED_IN:") ? "not_logged_in"
+    : msg.includes("FRAME_BIND_FAILED:") ? "frame_bind_failed"
+    : msg.includes("RESULT_PICK_MISMATCH:") ? "result_pick_mismatch"
+    : "runtime_error";
+  let message = msg;
+  // 页面自动化按简体中文界面文案定位控件：找不到控件、且页面上没有任何中文控件标签时，说明界面语言不对
+  if (error === "runtime_error" && /未找到|未在.*找到/.test(msg)) {{
+    const ui = await uiLanguage();
+    if (ui && ui.zhLabels === 0) {{
+      error = "unsupported_ui_language";
+      message = `Flow 界面不是简体中文（lang=${{ui.lang || "未知"}}）：页面自动化按简体中文界面定位控件，请把 Google 账号显示语言切到简体中文后重试。原始错误：${{msg}}`;
+    }}
+  }}
+  payload = {{ ok: false, error, message }};
 }} finally {{
   await restoreAgentMode();
   if (!__REUSED_SPACE__) {{
@@ -1615,11 +1636,21 @@ try {
   if (err && err.directFallback) {
     payload = { ok: false, transport: 'direct', fallback: true, fallback_reason: err.message, timings };
   } else {
-    payload = {
-      ok: false, transport: 'direct',
-      error: msg.includes('NOT_LOGGED_IN:') ? 'not_logged_in' : (err && err.directSent ? 'direct_post_unknown' : 'runtime_error'),
-      message: (err && err.directSent) ? err.message : msg, timings,
-    };
+    let error = msg.includes('NOT_LOGGED_IN:') ? 'not_logged_in' : (err && err.directSent ? 'direct_post_unknown' : 'runtime_error');
+    let message = (err && err.directSent) ? err.message : msg;
+    if (error === 'runtime_error' && /未找到|未在.*找到/.test(msg)) {
+      try {
+        const ui = await page.evaluate(() => ({
+          lang: document.documentElement.lang || '',
+          zhLabels: [...document.querySelectorAll('[aria-label]')].filter(e => /[一-龥]/.test(e.getAttribute('aria-label') || '')).length,
+        }));
+        if (ui.zhLabels === 0) {
+          error = 'unsupported_ui_language';
+          message = `Flow 界面不是简体中文（lang=${ui.lang || '未知'}）：请把 Google 账号显示语言切到简体中文后重试。原始错误：${msg}`;
+        }
+      } catch (_) {}
+    }
+    payload = { ok: false, transport: 'direct', error, message, timings };
   }
 } finally {
   if (!__REUSED_SPACE__) {
@@ -1637,7 +1668,7 @@ def build_direct_image_js(guard_state: dict[str, Any], cfg: dict[str, Any]) -> s
     replacements = {
         "__RESULT_MARKER__": json.dumps(RESULT_MARKER),
         "__PURE_DIRECT_JS__": PURE_DIRECT_JS,
-        "__BOOTSTRAP__": build_space_bootstrap_js(guard_state, "flow studio image direct"),
+        "__BOOTSTRAP__": build_space_bootstrap_js(guard_state, f"{RUN_SPACE_PREFIX} image direct"),
         "__ENSURE_PROJECT_JS__": ENSURE_PROJECT_JS,
         "__CFG__": json.dumps(cfg, ensure_ascii=False),
     }
@@ -2070,8 +2101,24 @@ def run_direct_image(guard_state: dict[str, Any], cfg: dict[str, Any]) -> tuple[
     return result, notices
 
 
+# 页面上的选项是中文；CLI 与 shots.json 同时接受英文写法
+VIDEO_TYPE_ALIASES = {"frames": "帧", "frame": "帧", "ingredients": "素材", "assets": "素材"}
+THINKING_ALIASES = {"low": "低", "medium": "中", "high": "高"}
+
+
+def normalize_choices(params: dict[str, Any]) -> dict[str, Any]:
+    """把 video_type / thinking 的英文别名换成页面上的中文选项，返回新字典。"""
+    out = dict(params)
+    for key, aliases in (("video_type", VIDEO_TYPE_ALIASES), ("thinking", THINKING_ALIASES)):
+        value = out.get(key)
+        if isinstance(value, str) and value.strip().lower() in aliases:
+            out[key] = aliases[value.strip().lower()]
+    return out
+
+
 def generate_once(params: dict[str, Any]) -> dict[str, Any]:
     """执行一次生图或生视频（含窗口守卫、下载、预览图），返回完整结果。"""
+    params = normalize_choices(params)
     mode = params["mode"]
     transport = params.get("transport") or "auto"
     if transport not in TRANSPORTS:
@@ -2163,7 +2210,7 @@ def generate_once(params: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    guard_after = window_guard.collect_state(space_prefix=SPACE_PREFIX)
+    guard_after = window_guard.collect_state(space_prefix=RUN_SPACE_PREFIX)
     result["window_guard_after"] = {
         "action": guard_after.get("action"),
         "single_window_enforced": guard_after.get("single_window_enforced"),
@@ -2178,7 +2225,7 @@ def cmd_credits(args: argparse.Namespace) -> int:
     guard_before = check_guard_or_fail()
     js = build_credits_js(guard_before)
     result, notices = run_ego_node(js, timeout_sec=90)
-    guard_after = window_guard.collect_state(space_prefix=SPACE_PREFIX)
+    guard_after = window_guard.collect_state(space_prefix=RUN_SPACE_PREFIX)
     result["window_guard_after"] = {
         "action": guard_after.get("action"),
         "single_window_enforced": guard_after.get("single_window_enforced"),
@@ -2458,6 +2505,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="基于本机 Ego Lite 调用 Google Flow 生成图片/视频并自动下载到本地。"
     )
+    parser.add_argument("--version", action="version", version=f"flow-studio {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_credits = sub.add_parser("credits", help="查询当前 Google Flow 剩余点数与重置时间")
@@ -2482,7 +2530,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_img = sub.add_parser("image", help="通过 Google Flow 生成图片并下载到本地")
     add_common_gen_args(p_img, "image")
-    p_img.add_argument("--thinking", choices=["低", "中", "高"], default=None, help="图片模型思考等级（低/中/高）")
+    p_img.add_argument("--thinking", choices=["低", "中", "高", "low", "medium", "high"], default=None, help="图片模型思考等级（低/中/高，或 low/medium/high）")
     p_img.add_argument(
         "--transport",
         choices=list(TRANSPORTS),
@@ -2492,7 +2540,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_vid = sub.add_parser("video", help="通过 Google Flow 生成视频并下载到本地")
     add_common_gen_args(p_vid, "video")
-    p_vid.add_argument("--video-type", choices=["素材", "帧"], default=MODE_DEFAULTS["video"]["video_type"], help="视频类型（默认 素材）")
+    p_vid.add_argument("--video-type", choices=["素材", "帧", "ingredients", "frames"], default=MODE_DEFAULTS["video"]["video_type"], help="视频类型：素材/ingredients（默认）或 帧/frames（首帧、尾帧）")
     p_vid.add_argument("--resolution", choices=["360p", "720p"], default=MODE_DEFAULTS["video"]["resolution"], help="视频分辨率（默认 720p）")
     p_vid.add_argument("--duration", type=int, default=None, help="视频时长（秒）。不传则沿用编辑器当前值（常为 15 秒）；Omni 1.2 Flash 支持 3~15")
 

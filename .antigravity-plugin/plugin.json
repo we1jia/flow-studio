@@ -1,0 +1,26 @@
+{
+  "name": "flow-studio",
+  "displayName": "Flow Studio",
+  "version": "0.2.0",
+  "description": "Generate images and videos with Google Flow (Nano Banana, Omni, Veo) through your logged-in Ego Lite browser, with hard credit budgets and JSON output.",
+  "suggestedPrompts": [
+    "Generate a 16:9 image of a red fox in snow with Flow",
+    "Check my Google Flow credits"
+  ],
+  "category": "Media",
+  "author": {
+    "name": "we1jia",
+    "url": "https://github.com/we1jia"
+  },
+  "homepage": "https://github.com/we1jia/flow-studio",
+  "repository": "https://github.com/we1jia/flow-studio",
+  "license": "MIT",
+  "keywords": [
+    "google-flow",
+    "veo",
+    "nano-banana",
+    "image-generation",
+    "video-generation",
+    "agent-skill"
+  ]
+}

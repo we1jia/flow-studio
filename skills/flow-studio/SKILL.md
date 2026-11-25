@@ -1,11 +1,12 @@
 ---
 name: flow-studio
+license: MIT (see LICENSE.txt)
 description: Use when the user wants images or videos from Google Flow (Nano Banana 2.1, Nano Banana Pro, Omni 1.2 Flash, Veo 3.1) — 用 Flow 生图、生视频、跑一组镜头、查 Flow 点数 — or mentions flow_studio, flow-studio, or generating with the logged-in Ego Lite profile and Google AI Ultra credits.
 ---
 
 # Flow Studio
 
-脚本：本 skill 目录下的 `flow_studio.py`（按 README 安装后是 `~/.agents/skills/flow-studio/flow_studio.py`）。一条命令完成，读取单行 JSON 即可。脚本内部已执行 Ego Lite 窗口守卫（同目录 `ego_lite_window_guard.py`）并按其 action 处理，调用前不必另跑；还会复用 Flow 里的专用项目（默认“Agent CLI Studio”，环境变量 `FLOW_STUDIO_PROJECT` 可改）、下载原图、生成预览图。
+脚本：与这份 SKILL.md 同目录的 `flow_studio.py`（安装方式不同，目录也不同；Claude Code 加载 skill 时会给出 Base directory）。要求 macOS、Ego Lite 已登录 Google Flow，且 Flow 界面为简体中文；报 `unsupported_ui_language` 时请用户把 Google 账号显示语言切到简体中文。一条命令完成，读取单行 JSON 即可。脚本内部已执行 Ego Lite 窗口守卫（同目录 `ego_lite_window_guard.py`）并按其 action 处理，调用前不必另跑；还会复用 Flow 里的专用项目（默认“Agent CLI Studio”，环境变量 `FLOW_STUDIO_PROJECT` 可改）、下载原图、生成预览图。
 
 ## 省 Token 规则（必须遵守）
 
@@ -20,7 +21,7 @@ description: Use when the user wants images or videos from Google Flow (Nano Ban
 ## 命令
 
 ```bash
-S=~/.agents/skills/flow-studio/flow_studio.py
+S=<本 skill 目录>/flow_studio.py   # 例：~/.agents/skills/flow-studio/flow_studio.py
 python3 $S image --prompt "..." [--aspect 16:9] [--count 1] [--model "Nano Banana Pro"] [--ref-image /abs/a.png] [--name 前缀]
 python3 $S video --prompt "..." [--model "Veo 3.1 - Lite"] [--aspect 16:9|9:16] [--duration 4] [--video-type 帧 --ref-image /abs/首帧.png [--ref-image /abs/尾帧.png]] [--resolution 360p] --max-credits <用户同意的上限>
 python3 $S batch --plan /abs/shots.json --dry-run                 # 含视频时先干跑：0 点，汇总每条与总预估
@@ -29,6 +30,7 @@ python3 $S credits
 ```
 
 - 视频不写 `--model` 时默认 Omni 1.2 Flash；`--max-credits` 默认 100。
+- `--video-type` 也接受 `frames` / `ingredients`，`--thinking` 也接受 `low` / `medium` / `high`（shots.json 同样适用）。
 - 输出默认落在当前工作目录的 `outputs/flow_studio/`，环境变量 `FLOW_STUDIO_OUT_DIR` 或 `--out-dir` 可改。
 - **视频参考图有两种用法**：`--video-type 帧` + `--ref-image` = 首帧，再加第 2 张 = 尾帧；默认 `素材` + `--ref-image` = 素材参考图（不是首帧）。
 - 帧模式的 `--dry-run` 会真实上传并核对首/尾帧绑定（结果 `frame_binding[].verified`），不提交不扣点。真跑后自动核对：时长与 `--duration` 相差超过 1.5 秒判 `result_mismatch`；成片首帧与首帧图 SSIM 低于 0.4 判 `first_frame_mismatch`（`files[].first_frame_ssim`；尾帧只给 `last_frame_ssim` 和警告）。两者都会停批量。这两项核对分不出首尾帧和时长都相同的旧视频：同一组首尾帧重跑后，看 `pick_diag.label_seen_before` 或警告“可能拿到了旧视频”，出现就先核对再交付。
@@ -66,6 +68,8 @@ python3 $S credits
 |---|---|
 | `not_logged_in`、验证码、`guard_after` 为 `stop_*` | 立即停止，交给用户 |
 | `runtime_error` 含 `page label not found` / `Task space does not exist` | 多半是别的 agent 或定时任务同时在用 Ego Lite。先跑 `credits` 看点数有没有扣：没扣说明没提交，等对方结束后再跑；扣了按 `result_mismatch` 处理 |
+| 错误含 `no longer assigned to the agent` | Ego Lite 的硬停止：这个 Space 的任务已结束。不要重试，也不要自己接管或 claim，把原文告诉用户，等用户明确同意再继续 |
+| `unsupported_ui_language` | Flow 界面不是简体中文，页面自动化找不到控件：请用户把 Google 账号显示语言切到简体中文 |
 | `direct_post_unknown`、`direct_unparsed_reply`、`direct_http_error` | 请求已发出、可能已生成：**不要重跑，也不要换 `--transport ui` 绕过**。请用户到 Flow 专用项目看最新一张是否就是这次的提示词；用户确认没有、并同意后再跑一次 |
 | `download_failed` | 图已生成，只是下载失败：不要重新生成，把 `images[].media_id` 告诉用户 |
 | `flow_unusual_activity` | Flow 风控，未扣费：停下，至少等几小时再试；不要换提示词或换路径硬刷 |

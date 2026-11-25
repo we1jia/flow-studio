@@ -1,100 +1,269 @@
-# flow-studio
+<p align="center">
+  <img src=".claude-plugin/icon.png" width="96" alt="flow-studio icon">
+</p>
 
-> A deterministic CLI + agent skill that drives Google Flow (Nano Banana / Omni / Veo) through your logged-in Ego Lite browser, with hard credit budgets and machine-readable JSON output. Unofficial; not affiliated with Google.
+<h1 align="center">flow-studio</h1>
 
-让 Claude Code、Codex、Antigravity 等 Agent 用**一条命令**在 Google Flow 里生图、生视频，并把成品下载到本地。它复用你在 Ego Lite 浏览器里已经登录的 Google 账号，不导出、不上传任何 Cookie。
+<p align="center">
+  <b>Let your coding agent make images and videos in Google Flow — one command, a hard credit budget, and results it can verify.</b>
+</p>
 
-## 能做什么
+<p align="center">
+  <a href="https://github.com/we1jia/flow-studio/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/we1jia/flow-studio/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Python 3" src="https://img.shields.io/badge/python-3-3776AB.svg?logo=python&logoColor=white">
+  <img alt="macOS" src="https://img.shields.io/badge/platform-macOS-000000.svg?logo=apple">
+  <a href="https://skills.sh"><img alt="Agent Skill" src="https://img.shields.io/badge/agent-skill-8A2BE2.svg"></a>
+</p>
 
-- **生图**：Nano Banana 2.1（默认，走页面内直连，约 20 秒一次）、Nano Banana Pro 等；支持参考图。
-- **生视频**：Omni 1.2 Flash（默认）、Veo 3.1；支持首帧、首帧 + 尾帧、素材参考图，可设时长和分辨率。
-- **批量**：一份 `shots.json` 串行跑完一组镜头，支持干跑估价、只跑指定镜头、跳过已完成的镜头。
-- **查点数**：`credits` 读取剩余点数和重置时间。
+<p align="center">
+  English · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-## 为什么不是普通脚本
+<p align="center">
+  <img src="docs/assets/demo.webp" width="720" alt="Animated clip: an anime girl on a pier at dusk, a glowing whale floats up and light rings swirl around her">
+  <br>
+  <sub>A clip from a 54-second short. The character sheet, the 10-shot storyboard and every video clip were generated with flow-studio; the cut was edited in Palmier Pro.</sub>
+</p>
 
-- **硬预算**：提交视频前读取页面上的实时扣点，超过 `--max-credits` / `--max-total-credits` 就在提交前拦截，不扣点。
-- **结果核对**：
-  - 帧模式干跑会真实上传并核对首/尾帧绑定；
-  - 真跑后核对成片时长，并用 SSIM 比对成片首帧和你给的首帧图；
-  - 按去掉缩略图尺寸后缀的媒体 key 区分新旧卡片，防止拿到项目里的旧视频。
-- **不抢窗口**：运行前后都跑窗口守卫 `ego_lite_window_guard.py`。它只复用名字以 `flow studio` 开头的 Task Space，不接管用户窗口，也不碰其他 Agent 正在用的 Space。
-- **省 Token**：默认只输出一行精简 JSON；图片附 512px 缩略图，视频附 4 帧拼图，Agent 只需看预览图。
+---
 
-## 环境要求
+flow-studio is an [Agent Skill](https://skills.sh) plus a single-file CLI. It drives [Google Flow](https://labs.google/fx/tools/flow) (Nano Banana, Omni, Veo) through **your own signed-in [Ego Lite](https://lite.ego.app/) browser**, so agents such as Claude Code, Codex and Antigravity can generate images and videos without you exporting cookies or API keys. Every run returns one line of JSON, so the agent knows exactly what happened.
 
-- macOS（窗口守卫用 `osascript`，缩略图用 `sips`）
-- [Ego Lite](https://lite.ego.app/) 浏览器，提供 `ego-browser` 命令；在其中登录可以使用 Google Flow 的 Google 账号
-- Python 3（开发与测试用 3.13），只用标准库
-- `ffmpeg` / `ffprobe`：视频预览、时长核对和首帧 SSIM 需要
-- Node.js：只有跑测试时需要
+> [!NOTE]
+> Independent project, not affiliated with Google. Video generation spends your Flow credits, and spent credits cannot be refunded.
 
-## 安装
+## Contents
 
-作为 Agent skill 安装（仓库根目录就是 skill 目录）：
+- [Why flow-studio](#why-flow-studio)
+- [Showcase](#showcase)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Credit safety](#credit-safety)
+- [Result verification](#result-verification)
+- [Configuration](#configuration)
+- [Limitations](#limitations)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Acknowledgements](#acknowledgements) · [License](#license)
+
+## Why flow-studio
+
+| | |
+|---|---|
+| **One command, one JSON line** | `image`, `video`, `batch` and `credits` subcommands. The output carries file paths, previews, credit estimates and verification results. |
+| **Hard credit budget** | Before a video is submitted, flow-studio reads the live cost shown on the page. If it exceeds `--max-credits` / `--max-total-credits`, the run stops **before** anything is charged. |
+| **Start and end frames** | Frame mode binds a start frame and an optional end frame to Flow's slots, and the dry run confirms the binding without spending credits. |
+| **Verified results** | After a run it checks the clip duration, compares the first frame with your start frame (SSIM), and makes sure it picked the *new* clip, not an older one in the project. |
+| **Safe browser sharing** | A window guard runs before and after every job. flow-studio never takes over your windows or another agent's Task Space. |
+| **Token-frugal** | Images get a 512 px thumbnail and videos a 4-frame contact sheet, so the agent checks a small preview instead of the full file. |
+
+## Showcase
+
+Made with flow-studio, from character sheet to final cut:
+
+<p align="center">
+  <img src="docs/assets/pipeline.jpg" alt="Pipeline: a character sheet image, a 10-shot storyboard generated in one batch, and four frames from the finished video clips">
+</p>
+
+<p align="center">
+  <img src="docs/assets/showcase.jpg" alt="Eight frames from the finished short: the girl and the whale on the pier, an underwater library, a purple vortex, a burst of light, a starry path and a sunrise farewell">
+</p>
+
+## Requirements
+
+| | |
+|---|---|
+| OS | macOS (the window guard uses `osascript`, thumbnails use `sips`) |
+| Browser | [Ego Lite](https://lite.ego.app/) with its `ego-browser` CLI, signed in to a Google account that can use Google Flow |
+| Flow UI language | **Simplified Chinese.** Page automation locates controls by their Chinese labels (see [Limitations](#limitations)) |
+| Python | Python 3, standard library only (developed and tested on 3.13) |
+| Optional | `ffmpeg` / `ffprobe` for video previews, duration checks and SSIM; Node.js to run the tests |
+
+## Installation
+
+### Any agent (recommended)
+
+Use the open [skills](https://github.com/vercel-labs/skills) CLI. It supports Claude Code, Codex, Cursor, OpenCode and many more:
+
+```bash
+npx skills add we1jia/flow-studio -g
+```
+
+Add `-a claude-code` (or `-a codex`, …) to pick the agent; drop `-g` to install into the current project only.
+
+### Claude Code
+
+Install it as a plugin (Claude Code 2.1.275 or later):
+
+```text
+/plugin install flow-studio --marketplace we1jia/flow-studio
+```
+
+On older versions, register the marketplace first:
+
+```text
+/plugin marketplace add we1jia/flow-studio
+/plugin install flow-studio@flow-studio
+```
+
+### Antigravity
+
+```bash
+agy plugin install https://github.com/we1jia/flow-studio
+```
+
+### Manual
 
 ```bash
 git clone https://github.com/we1jia/flow-studio.git ~/flow-studio
-mkdir -p ~/.agents/skills && ln -s ~/flow-studio ~/.agents/skills/flow-studio
+mkdir -p ~/.agents/skills ~/.claude/skills
+ln -s ~/flow-studio/skills/flow-studio ~/.agents/skills/flow-studio   # Codex and other agents
+ln -s ~/.agents/skills/flow-studio ~/.claude/skills/flow-studio      # Claude Code
 ```
 
-Claude Code 再加一条链接：
+### Or just ask your agent
+
+> Install the flow-studio skill from https://github.com/we1jia/flow-studio
+
+## Quick start
+
+Talk to your agent in plain language. It follows [`SKILL.md`](skills/flow-studio/SKILL.md): a dry run first, then it asks you to approve a credit amount before anything is charged.
+
+> *Generate four 16:9 images of a red fox in the snow, cinematic lighting.*
+>
+> *Turn these two storyboard frames into a 4-second 360p clip. Budget: 4 credits.*
+>
+> *How many Flow credits do I have left?*
+
+Or call the CLI yourself:
 
 ```bash
-mkdir -p ~/.claude/skills && ln -s ~/.agents/skills/flow-studio ~/.claude/skills/flow-studio
-```
+S=~/.agents/skills/flow-studio/flow_studio.py
 
-Agent 会按 [`SKILL.md`](SKILL.md) 调用脚本：先干跑估价，拿到你同意的点数再真跑，成品发回对话。
-
-## 直接用命令行
-
-```bash
-S=~/flow-studio/flow_studio.py
-
-# 生图（Nano Banana 2.1 不扣点）
+# Images: Nano Banana 2.1 spends no credits
 python3 $S image --prompt "a red fox in snow, cinematic" --aspect 16:9 --count 2
 
-# 视频：先干跑看报价，再按你接受的上限真跑
+# Video: dry-run for the quote, then run with the budget you accept
 python3 $S video --prompt "..." --duration 4 --resolution 360p --dry-run
 python3 $S video --prompt "..." --duration 4 --resolution 360p --max-credits 4
 
-# 首帧 + 尾帧
-python3 $S video --prompt "..." --video-type 帧 --ref-image /abs/start.png --ref-image /abs/end.png --duration 4 --max-credits 4
+# Start + end frames
+python3 $S video --prompt "..." --video-type frames \
+  --ref-image /abs/start.png --ref-image /abs/end.png --duration 4 --max-credits 4
 
-# 批量
+# A whole shot list (runs one shot at a time; resumable)
 python3 $S batch --plan /abs/shots.json --dry-run
 python3 $S batch --plan /abs/shots.json --max-total-credits 40 --skip-existing
 
 python3 $S credits
 ```
 
-全部参数看 `python3 flow_studio.py <子命令> --help`。返回字段与错误码的处理方式见 [`SKILL.md`](SKILL.md)。
+Run `python3 flow_studio.py <command> --help` for every option. A `shots.json` example is in [`SKILL.md`](skills/flow-studio/SKILL.md).
 
-## 配置
+## How it works
 
-| 环境变量 | 作用 | 默认 |
-|---|---|---|
-| `FLOW_STUDIO_OUT_DIR` | 成品下载目录 | 当前工作目录下的 `outputs/flow_studio` |
-| `FLOW_STUDIO_PROJECT` | Flow 里复用的专用项目名 | `Agent CLI Studio` |
-
-运行状态和上传缓存放在 `~/.cache/flow_studio/`。
-
-## 测试
-
-```bash
-python3 -m pytest -q tests
+```mermaid
+flowchart LR
+    A[Your agent] -->|one command| B[flow_studio.py]
+    B --> G{Window guard}
+    G -->|safe| E[Ego Lite<br/>your signed-in profile]
+    G -->|unsafe| X[Stop with JSON error]
+    E --> F[Google Flow<br/>dedicated project]
+    F -->|download| D[Files + previews]
+    D --> V[Verify: duration,<br/>first-frame SSIM,<br/>new clip picked]
+    V -->|one JSON line| A
 ```
 
-测试不访问网络、不打开浏览器、不扣点。
+- **Images** take the fast path by default: a direct request from inside the Flow page, roughly 20–30 seconds per call and no clicking. If that path can't be used, flow-studio falls back to page automation.
+- **Videos** always use page automation, so the live cost check runs before every submit.
+- Everything happens in one dedicated Flow project (default: `Agent CLI Studio`), so your Flow home page doesn't fill up with empty projects.
 
-## 声明
+## Credit safety
 
-- 本项目是非官方工具，与 Google 无关。“Google Flow”“Nano Banana”“Veo”等名称归各自权利人所有。
-- 它通过网页自动化和 Flow 网页内部接口工作，Flow 改版后可能失效；自动化使用可能不符合相关服务条款，请自行评估风险。
-- 生成视频会消耗你账号的点数，扣掉的点数无法退回。脚本的预算拦截只能减少误扣，不能替你做决定。
+- **Quote first.** `--dry-run` fills the form, reads the cost and stops. In frame mode it also uploads your frames and checks the binding. It never spends credits.
+- **Hard ceiling.** If the cost is above `--max-credits` (default 100) or `--max-total-credits`, the run is blocked before submission (`budget_exceeded`). If the cost can't be read, it is blocked too (`unknown_cost`) unless you pass `--allow-unknown-cost`.
+- **No silent retries.** A request that may already have been billed is never resent automatically. The error tells the agent whether credits may have been spent and what to check next.
+- **Canary runs.** For larger batches, `SKILL.md` tells the agent to run one shot first, check it, then `--skip-existing` the rest.
 
-## 致谢与许可
+## Result verification
 
-生图直连的请求格式移植自 [gflow-cli](https://github.com/ffroliva/gflow-cli)（MIT），见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+A real 4-credit run (paths shortened, fields trimmed):
 
-本项目以 [MIT](LICENSE) 许可发布。
+<p align="center">
+  <img src="docs/assets/terminal.svg" width="755" alt="Terminal: flow_studio.py video in frame mode returns ok true, estimated 4 credits, a 4.03-second 640x360 clip, first-frame SSIM 0.653, last-frame SSIM 0.548, both frame slots verified, label_seen_before false">
+</p>
+
+The start and end frames you gave, next to the first and last frames of the clip Flow produced:
+
+<p align="center">
+  <img src="docs/assets/frame-check.jpg" width="720" alt="Side-by-side check: the start frame you gave versus the video's first frame (SSIM 0.653), and the end frame you gave versus the video's last frame (SSIM 0.548)">
+</p>
+
+| Check | Fails as | Meaning |
+|---|---|---|
+| Duration differs from `--duration` by more than 1.5 s | `result_mismatch` | Wrong clip, or the duration setting didn't apply |
+| First frame vs. your start frame, SSIM below 0.4 | `first_frame_mismatch` | The start frame didn't take |
+| Picked card's title existed before the run | warning | Possibly an older clip; check before delivering |
+
+Both failures stop a batch. What the agent sees is the 4-frame preview below, not the full video:
+
+<p align="center">
+  <img src="docs/assets/preview-sheet.jpg" width="480" alt="Four-frame contact sheet of the generated clip">
+</p>
+
+## Configuration
+
+| Environment variable | Purpose | Default |
+|---|---|---|
+| `FLOW_STUDIO_OUT_DIR` | Where downloads go | `./outputs/flow_studio` (current directory) |
+| `FLOW_STUDIO_PROJECT` | Name of the dedicated Flow project | `Agent CLI Studio` |
+
+State and the upload cache live in `~/.cache/flow_studio/`. Option values have English aliases: `--video-type frames|ingredients`, `--thinking low|medium|high`.
+
+## Limitations
+
+- **macOS only**, because Ego Lite and the window guard are macOS-specific.
+- **Simplified Chinese Flow UI.** Page automation (videos, reference images and fallback image runs) finds controls by their Chinese labels. With another UI language it fails fast with `unsupported_ui_language`; switch your Google account's display language to Simplified Chinese. English UI support is welcome as a contribution.
+- **UI drift.** Flow changes often. When a control can't be found, the run stops with an error instead of guessing.
+- **One run at a time per agent.** Concurrent runs from different sessions keep to their own Task Spaces, but queue your shots with `batch` rather than starting parallel jobs.
+- Extending clips, chaining shots, upscaling and reusable characters aren't covered. [gflow-cli](https://github.com/ffroliva/gflow-cli) does those.
+
+## Troubleshooting
+
+| You see | Do this |
+|---|---|
+| `not_logged_in` | Sign in to Google Flow in Ego Lite, then retry |
+| `unsupported_ui_language` | Switch your Google account's display language to Simplified Chinese |
+| `budget_exceeded` / `unknown_cost` | Nothing was charged. Raise the budget only if you agree with the quote |
+| `flow_unusual_activity` | Flow's rate limiting. Nothing was charged; wait a few hours |
+| `result_mismatch` / `first_frame_mismatch` | Credits **were** spent. Don't rerun; check the newest clip in the Flow project |
+| `no longer assigned to the agent` | Ego Lite ended that Task Space. Don't retry from the agent; continue only when you choose to |
+
+The full error table that agents follow is in [`SKILL.md`](skills/flow-studio/SKILL.md#结果处理).
+
+## Development
+
+```text
+skills/flow-studio/      the skill: SKILL.md, flow_studio.py, ego_lite_window_guard.py
+tests/                   unit tests (no network, no browser, no credits)
+.claude-plugin/          Claude Code plugin + marketplace manifests
+.antigravity-plugin/     Antigravity plugin manifest
+docs/assets/             README images
+```
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+Issues and pull requests are welcome. When reporting a bug, include the command and the JSON output (`--verbose`), and remove your email and local paths first.
+
+## Acknowledgements
+
+The request format for direct image generation is ported from [gflow-cli](https://github.com/ffroliva/gflow-cli) (MIT); see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+## License
+
+[MIT](LICENSE). "Google Flow", "Nano Banana" and "Veo" are trademarks of their respective owners. flow-studio automates the Flow web app on your behalf; make sure that fits the terms that apply to your account.

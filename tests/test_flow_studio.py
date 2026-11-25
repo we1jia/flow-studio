@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 
-MODULE_PATH = Path(__file__).parents[1] / "flow_studio.py"
+MODULE_PATH = Path(__file__).parents[1] / "skills" / "flow-studio" / "flow_studio.py"
 SPEC = importlib.util.spec_from_file_location("flow_studio", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -791,25 +791,75 @@ class ResultPickGuardTest(unittest.TestCase):
 
 
 class SpaceIsolationTest(unittest.TestCase):
-    """另一个 Agent 的定时任务与 Flow 真跑撞车：守卫不带前缀时把对方的 Space 当成可复用空间。"""
+    """守卫只复用本进程建的 Space：别的 Agent、别的会话里同时在跑的 flow_studio 都不能接手。"""
 
     X_SPACE = {"createdBy": "agent", "id": 115, "name": "news-radar-publish", "ownership": "agent", "taskId": "news-radar-publish"}
     USER_SPACE = {"createdBy": "user", "id": 0, "name": "", "ownership": "user", "taskId": ""}
 
-    def test_guard_called_with_flow_prefix(self):
+    def test_guard_called_with_run_prefix(self):
         with mock.patch.object(MODULE.window_guard, "collect_state", return_value={"action": "create_agent_task_space"}) as cs:
             MODULE.check_guard_or_fail()
-        cs.assert_called_once_with(space_prefix=MODULE.SPACE_PREFIX)
+        cs.assert_called_once_with(space_prefix=MODULE.RUN_SPACE_PREFIX)
+        self.assertTrue(MODULE.RUN_SPACE_PREFIX.startswith(MODULE.SPACE_PREFIX))
 
-    def test_prefix_matches_own_space_names(self):
-        for name in ("flow studio credits", "flow studio video", "flow studio image direct"):
-            self.assertTrue(name.startswith(MODULE.SPACE_PREFIX))
+    def test_generated_space_names_use_run_prefix(self):
+        for js in (MODULE.build_credits_js(GUARD_CREATE),
+                   MODULE.build_generate_js(GUARD_CREATE, base_cfg("video")),
+                   MODULE.build_direct_image_js(GUARD_CREATE, {**base_cfg("image"), "transport": "direct"})):
+            self.assertIn(json.dumps(MODULE.RUN_SPACE_PREFIX)[:-1], js)
 
     def test_other_agent_space_is_foreign_not_reusable(self):
-        state = MODULE.window_guard.decide(1, [self.USER_SPACE, self.X_SPACE], ["Google Flow - O2T"], space_prefix=MODULE.SPACE_PREFIX)
+        state = MODULE.window_guard.decide(1, [self.USER_SPACE, self.X_SPACE], ["Google Flow - O2T"], space_prefix=MODULE.RUN_SPACE_PREFIX)
         self.assertEqual("create_agent_task_space", state["action"])
         self.assertEqual([], state["reusable_task_space_ids"])
         self.assertEqual([115], [s["id"] for s in state["foreign_agent_spaces"]])
+
+    def test_concurrent_flow_studio_run_is_foreign(self):
+        """另一会话的 flow_studio（pid 不同，或 pid 只是本进程 pid 的前缀）也是禁止触碰的对象。"""
+        mine = {"createdBy": "agent", "id": 130, "name": f"{MODULE.RUN_SPACE_PREFIX} video", "ownership": "agent"}
+        other = {"createdBy": "agent", "id": 121, "name": "flow studio #1: image direct", "ownership": "agent"}
+        legacy = {"createdBy": "agent", "id": 122, "name": "flow studio image direct", "ownership": "agent"}
+        state = MODULE.window_guard.decide(1, [self.USER_SPACE, other, legacy, mine], ["Google Flow"], space_prefix=MODULE.RUN_SPACE_PREFIX)
+        self.assertEqual([130], state["reusable_task_space_ids"])
+        self.assertEqual({121, 122}, {s["id"] for s in state["foreign_agent_spaces"]})
+
+
+class EnglishAliasTest(unittest.TestCase):
+    """CLI 与 shots.json 接受英文写法，进入页面前换成页面上的中文选项。"""
+
+    def test_aliases_map_to_page_labels(self):
+        out = MODULE.normalize_choices({"video_type": "Frames", "thinking": "high", "prompt": "x"})
+        self.assertEqual("帧", out["video_type"])
+        self.assertEqual("高", out["thinking"])
+        self.assertEqual("素材", MODULE.normalize_choices({"video_type": "ingredients"})["video_type"])
+
+    def test_chinese_values_and_missing_keys_pass_through(self):
+        self.assertEqual({"video_type": "帧", "thinking": None}, MODULE.normalize_choices({"video_type": "帧", "thinking": None}))
+
+    def test_cli_accepts_english_choices(self):
+        args = MODULE.build_parser().parse_args(["video", "--prompt", "x", "--video-type", "frames"])
+        self.assertEqual("frames", args.video_type)
+        args = MODULE.build_parser().parse_args(["image", "--prompt", "x", "--thinking", "low"])
+        self.assertEqual("low", args.thinking)
+
+    def test_version_flag(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            MODULE.build_parser().parse_args(["--version"])
+        self.assertIn(MODULE.__version__, out.getvalue())
+
+
+class UiLanguageErrorTest(unittest.TestCase):
+    """页面自动化只认简体中文界面：找不到控件且页面无中文控件标签时报 unsupported_ui_language。"""
+
+    def test_generate_script_reports_unsupported_ui_language(self):
+        js = MODULE.build_generate_js(GUARD_CREATE, base_cfg("video"))
+        self.assertIn("unsupported_ui_language", js)
+        self.assertIn("zhLabels === 0", js)
+
+    def test_direct_script_reports_unsupported_ui_language(self):
+        js = MODULE.build_direct_image_js(GUARD_CREATE, {**base_cfg("image"), "transport": "direct"})
+        self.assertIn("unsupported_ui_language", js)
 
 
 if __name__ == "__main__":

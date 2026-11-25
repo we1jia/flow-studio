@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="755" height="653" viewBox="0 0 755 653" role="img" aria-label="Terminal: a real flow_studio.py video run returning JSON with frame binding verified, SSIM scores and the picked clip">
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace" font-size="14">
+<rect width="755" height="653" rx="10" fill="#0d1117"/>
+<rect x="0.5" y="0.5" width="754" height="652" rx="10" fill="none" stroke="#30363d"/>
+<circle cx="22" cy="20" r="6" fill="#ff5f57"/><circle cx="42" cy="20" r="6" fill="#febc2e"/><circle cx="62" cy="20" r="6" fill="#28c840"/>
+<text x="377" y="25" text-anchor="middle" fill="#8b949e">flow-studio — real run, 360p · 4 s · 4 credits</text>
+<line x1="0" y1="40" x2="755" y2="40" stroke="#30363d"/>
+<text x="22" y="66" xml:space="preserve"><tspan fill="#7ee787">$ </tspan><tspan fill="#e6edf3">python3 flow_studio.py video \</tspan></text>
+<text x="22" y="87" xml:space="preserve"><tspan fill="#e6edf3">    --prompt </tspan><tspan fill="#a5d6ff">&quot;Smooth 4-second transition: the anime girl on the seaside pier</tspan></text>
+<text x="22" y="108" xml:space="preserve"><tspan fill="#a5d6ff">      at dusk ... no dialogue, ambient sound only.&quot;</tspan><tspan fill="#e6edf3"> \</tspan></text>
+<text x="22" y="129" xml:space="preserve"><tspan fill="#e6edf3">    --video-type 帧 --ref-image 01_开场.jpg --ref-image 02_大肥鱼醒来.jpg \</tspan></text>
+<text x="22" y="150" xml:space="preserve"><tspan fill="#e6edf3">    --duration 4 --resolution 360p --aspect 16:9 \</tspan></text>
+<text x="22" y="171" xml:space="preserve"><tspan fill="#e6edf3">    --name frame_fix_verify3 --max-credits 4</tspan></text>
+<text x="22" y="213" xml:space="preserve"><tspan fill="#e6edf3">{</tspan></text>
+<text x="22" y="234" xml:space="preserve"><tspan fill="#79c0ff">  &quot;ok&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#7ee787">true</tspan><tspan fill="#e6edf3">,</tspan></text>
+<text x="22" y="255" xml:space="preserve"><tspan fill="#79c0ff">  &quot;model&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;Omni 1.2 Flash&quot;</tspan><tspan fill="#e6edf3">,</tspan></text>
+<text x="22" y="276" xml:space="preserve"><tspan fill="#79c0ff">  &quot;credits&quot;</tspan><tspan fill="#e6edf3">: { </tspan><tspan fill="#79c0ff">&quot;estimated&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#ffa657">4</tspan><tspan fill="#e6edf3"> },</tspan></text>
+<text x="22" y="297" xml:space="preserve"><tspan fill="#79c0ff">  &quot;files&quot;</tspan><tspan fill="#e6edf3">: [{</tspan></text>
+<text x="22" y="318" xml:space="preserve"><tspan fill="#79c0ff">    &quot;path&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;~/outputs/flow_studio/frame_fix_verify3.mp4&quot;</tspan><tspan fill="#e6edf3">,</tspan></text>
+<text x="22" y="339" xml:space="preserve"><tspan fill="#79c0ff">    &quot;preview&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;~/outputs/flow_studio/_preview/frame_fix_verify3_sheet.jpg&quot;</tspan><tspan fill="#e6edf3">,</tspan></text>
+<text x="22" y="360" xml:space="preserve"><tspan fill="#79c0ff">    &quot;width&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#ffa657">640</tspan><tspan fill="#e6edf3">, </tspan><tspan fill="#79c0ff">&quot;height&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#ffa657">360</tspan><tspan fill="#e6edf3">, </tspan><tspan fill="#79c0ff">&quot;duration&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#ffa657">4.03</tspan><tspan fill="#e6edf3">,</tspan></text>
+<text x="22" y="381" xml:space="preserve"><tspan fill="#79c0ff">    &quot;first_frame_ssim&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#ffa657">0.653</tspan><tspan fill="#e6edf3">, </tspan><tspan fill="#79c0ff">&quot;last_frame_ssim&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#ffa657">0.548</tspan></text>
+<text x="22" y="402" xml:space="preserve"><tspan fill="#e6edf3">  }],</tspan></text>
+<text x="22" y="423" xml:space="preserve"><tspan fill="#79c0ff">  &quot;frame_binding&quot;</tspan><tspan fill="#e6edf3">: [</tspan></text>
+<text x="22" y="444" xml:space="preserve"><tspan fill="#e6edf3">    { </tspan><tspan fill="#79c0ff">&quot;slot&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;start&quot;</tspan><tspan fill="#e6edf3">, </tspan><tspan fill="#79c0ff">&quot;name&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;01_开场-cd86853d.jpg&quot;</tspan><tspan fill="#e6edf3">, </tspan><tspan fill="#79c0ff">&quot;verified&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#7ee787">true</tspan><tspan fill="#e6edf3"> },</tspan></text>
+<text x="22" y="465" xml:space="preserve"><tspan fill="#e6edf3">    { </tspan><tspan fill="#79c0ff">&quot;slot&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;end&quot;</tspan><tspan fill="#e6edf3">,   </tspan><tspan fill="#79c0ff">&quot;name&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;02_大肥鱼醒来-a37ad0e7.jpg&quot;</tspan><tspan fill="#e6edf3">, </tspan><tspan fill="#79c0ff">&quot;verified&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#7ee787">true</tspan><tspan fill="#e6edf3"> }</tspan></text>
+<text x="22" y="486" xml:space="preserve"><tspan fill="#e6edf3">  ],</tspan></text>
+<text x="22" y="507" xml:space="preserve"><tspan fill="#79c0ff">  &quot;pick_diag&quot;</tspan><tspan fill="#e6edf3">: {</tspan></text>
+<text x="22" y="528" xml:space="preserve"><tspan fill="#79c0ff">    &quot;picked&quot;</tspan><tspan fill="#e6edf3">: [{ </tspan><tspan fill="#79c0ff">&quot;label&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;Anime girl looking at whale&quot;</tspan><tspan fill="#e6edf3"> }],</tspan></text>
+<text x="22" y="549" xml:space="preserve"><tspan fill="#79c0ff">    &quot;label_seen_before&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#7ee787">false</tspan></text>
+<text x="22" y="570" xml:space="preserve"><tspan fill="#e6edf3">  },</tspan></text>
+<text x="22" y="591" xml:space="preserve"><tspan fill="#79c0ff">  &quot;transport&quot;</tspan><tspan fill="#e6edf3">: </tspan><tspan fill="#a5d6ff">&quot;ui&quot;</tspan></text>
+<text x="22" y="612" xml:space="preserve"><tspan fill="#e6edf3">}</tspan></text>
+</g></svg>
