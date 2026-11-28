@@ -1,7 +1,7 @@
 {
   "name": "flow-studio",
   "displayName": "Flow Studio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Generate images and videos with Google Flow (Nano Banana, Omni, Veo) through your logged-in Ego Lite browser, with hard credit budgets and JSON output.",
   "suggestedPrompts": [
     "Generate a 16:9 image of a red fox in snow with Flow",

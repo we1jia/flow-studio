@@ -38,7 +38,7 @@ SPACE_PREFIX = "flow studio"
 # 每个进程独有的空间名前缀（冒号防止 #12 误配 #123）：只复用本进程建的 Space，
 # 不会接手别的会话或 Agent 同时在跑、或刚结束的 flow_studio Space
 RUN_SPACE_PREFIX = f"{SPACE_PREFIX} #{os.getpid()}:"
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 STATE_FILE = Path.home() / ".cache" / "flow_studio" / "state.json"
 # 输出目录：环境变量 FLOW_STUDIO_OUT_DIR 优先，否则为当前工作目录下的 outputs/flow_studio
 DEFAULT_OUT_DIR = Path(os.environ.get("FLOW_STUDIO_OUT_DIR") or Path.cwd() / "outputs" / "flow_studio").expanduser()
@@ -109,7 +109,7 @@ function extForContentType(ct) {
 
 
 def load_state() -> dict[str, Any]:
-    """读取本地状态文件（仅保存默认专用项目 URL，不含任何凭证）。"""
+    """读取本地状态文件（只保存项目名 → 项目地址，不含任何凭证）。"""
     if not STATE_FILE.exists():
         return {}
     try:
@@ -331,7 +331,7 @@ async function uploadIntoOpenPicker(imgPath) {
     const r = u.getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   });
-  if (!uploadRect) throw new Error("帧选择弹层里未找到可见的“上传媒体”按钮");
+  if (!uploadRect) throw new Error("素材弹层里未找到可见的“上传媒体”按钮");
   // 真实鼠标点击才算可信用户手势，否则 Chromium 拦截文件选择框
   const [fc] = await Promise.all([
     page.waitForFileChooser({ timeout: 10000 }),
@@ -451,21 +451,340 @@ async function setDuration(wantSeconds) {
 }
 """
 
+ATTACH_REFS_JS = r"""
+// 参考图（图片模式、视频素材模式）挂进输入框。依赖 BIND_FRAMES_JS 里的 uploadIntoOpenPicker / assetBase。
+// 2026-11-27 事故：旧做法上传后直接点“添加到提示”，加进去的是面板默认高亮的最近一张（别的任务留下的图）；
+// 而且 Flow 处理完新上传的图后，会自动把它挂进下一个打开该项目的页面的输入框。输入框里因此同时挂着两张图，
+// 三次成品都照着那张旧图改。现在的规则：输入框里只能有本次的参考图，多出来的一律移除；
+// 参考图按唯一文件名在资源列表里点选，确认高亮的是它，再“添加到提示”，并核对附件的素材地址；提交前再清理核对一次。
+function composerChips() {
+  return page.evaluate(() => {
+    const tb = document.querySelector('[role="textbox"][aria-label="您希望创作什么？"]') || document.querySelector('[role="textbox"]');
+    const send = document.querySelector('button[aria-label="开始生成"]');
+    let root = tb;
+    for (let d = 0; d < 12 && root; d++) {
+      if (send && root.contains(send)) break;
+      root = root.parentElement;
+    }
+    const scope = root || document;
+    // 输入框附件是 <flow-image-ingredient-chip>（2026-11-27 实测），按标签名后缀匹配，兼容别的素材类型
+    return [...scope.querySelectorAll('*')]
+      .filter(el => /^FLOW-[A-Z-]*INGREDIENT-CHIP$/.test(el.tagName))
+      .filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+      .map(el => {
+        const r = el.getBoundingClientRect();
+        return { tag: el.tagName.toLowerCase(), img: el.querySelector('img')?.src || null, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+  });
+}
+
+// 移除一张附件：鼠标移上去出现 cancel 图标（盖在附件中央），点一下即移除（2026-11-27 实测）
+async function removeChip(chip) {
+  const before = (await composerChips()).length;
+  await page.mouse.move(chip.x, chip.y);
+  await page.waitForTimeout(500);
+  await page.mouse.click(chip.x, chip.y, { label: "remove stray prompt attachment" });
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(400);
+    if ((await composerChips()).length < before) return true;
+  }
+  return false;
+}
+
+// 只保留 keep 里的素材（每个最多一张），其余附件全部移除；返回移除了几张
+async function pruneComposer(keep) {
+  let removed = 0;
+  for (let guard = 0; guard < 12; guard++) {
+    const chips = await composerChips();
+    const seen = new Set();
+    const stray = chips.find(c => {
+      const base = assetBase(c.img);
+      if (keep.includes(base) && !seen.has(base)) { seen.add(base); return false; }
+      return true;
+    });
+    if (!stray) return removed;
+    if (!(await removeChip(stray))) {
+      throw new Error(`COMPOSER_NOT_CLEAN: 输入框里有不是本次的素材，移除失败，已中止，未提交`);
+    }
+    removed++;
+  }
+  throw new Error(`COMPOSER_NOT_CLEAN: 输入框附件反复出现，移除 ${removed} 张后仍不干净，已中止，未提交`);
+}
+
+// 开项目后：输入框里不该有任何附件，有就移除
+async function ensureEmptyComposer() {
+  const stale = await pruneComposer([]);
+  return { stale };
+}
+
+function activeAssetTexts() {
+  return page.evaluate(() => [...document.querySelectorAll('[role="listbox"] [role="option"]')]
+    .filter(o => o.classList.contains('asset-item-active'))
+    .map(o => (o.innerText || '').replace(/\s+/g, ' ').trim()));
+}
+
+// 只读素材面板的“资源列表”：设置弹层等别的 listbox 可能同时可见，不能取第一个（2026-11-27 实测）
+function readPickerAssets() {
+  return page.evaluate(() => {
+    const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const boxes = [...document.querySelectorAll('[role="listbox"]')].filter(vis);
+    const lb = boxes.find(l => l.getAttribute('aria-label') === '资源列表') || boxes.find(l => l.querySelector('[role="option"].asset-item'));
+    if (!lb) return null;
+    const opts = [...lb.querySelectorAll('[role="option"]')].map(o => {
+      const r = o.getBoundingClientRect();
+      const text = (o.innerText || '').replace(/\s+/g, ' ').trim();
+      return { text, uploading: /正在上传|uploading/i.test(text), img: o.querySelector('img')?.src || null, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    return { label: lb.getAttribute('aria-label'), options: opts };
+  });
+}
+
+function listboxDiag() {
+  return page.evaluate(() => [...document.querySelectorAll('[role="listbox"]')]
+    .filter(l => { const r = l.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+    .map(l => ({ label: l.getAttribute('aria-label') || '', n: l.querySelectorAll('[role="option"]').length,
+      first: [...l.querySelectorAll('[role="option"]')].slice(0, 3).map(o => (o.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 30)) })));
+}
+
+// 素材面板是否已打开：看资源列表或“上传媒体”按钮（新项目素材库为空时没有资源列表，2026-11-27 实测）
+function addPickerOpen() {
+  return page.evaluate(() => {
+    const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    return [...document.querySelectorAll('[role="listbox"]')].some(vis)
+      || [...document.querySelectorAll('button')].some(b => vis(b) && ((b.innerText || '').includes('上传媒体') || /upload media/i.test(b.innerText || '')));
+  });
+}
+
+// 返回资源列表（素材库为空时 options 为空数组）；打不开返回 null。面板已开时不再点按钮（它是开关，会把面板关掉）
+async function openAddPicker() {
+  if (!(await addPickerOpen())) {
+    const rect = await page.evaluate(() => {
+      const b = [...document.querySelectorAll('button[aria-label="在提示框中添加素材"], button[aria-label*="添加素材"], button[aria-label*="Add media"]')]
+        .find(x => { const r = x.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    if (!rect) throw new Error("未找到“在提示框中添加素材”按钮");
+    await page.mouse.click(rect.x, rect.y, { label: "open add-media picker" });
+    try {
+      await page.waitForFunction(() => {
+        const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+        return [...document.querySelectorAll('[role="listbox"]')].some(vis)
+          || [...document.querySelectorAll('button')].some(b => vis(b) && ((b.innerText || '').includes('上传媒体') || /upload media/i.test(b.innerText || '')));
+      }, undefined, { timeout: 8000 });
+    } catch (_) {
+      return null;
+    }
+    await page.waitForTimeout(500);
+  }
+  return (await readPickerAssets()) || { label: null, options: [] };
+}
+
+async function closePicker() {
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+}
+
+// 列表里按唯一文件名找已入库的项（缩略图是 /asb/ 入库地址，才能核对加进输入框的是不是同一张）
+const readyOpt = (lst, name) => lst && lst.options.find(o => !o.uploading && o.text.includes(name) && String(o.img || '').includes('/asb/'));
+
+// 第一步（设置模型前）：把还没入库的参考图传上去，等 Flow 处理完。
+// 实测（2026-11-27）：处理要几十秒到几分钟，处理完才带入库缩略图进资源列表；处理完还会自动挂进输入框一次
+// （挂着的图不在列表里显示），这里等它出现后移除，后面统一按“点选已入库素材”加入。
+const REF_PROCESS_WAIT_MS = 240000;
+async function preUploadRefs(refImages) {
+  const results = [];
+  for (const imgPath of refImages) {
+    const name = path.basename(imgPath);
+    const byName = (lst) => lst && lst.options.find(o => !o.uploading && o.text.includes(name));
+    await closePicker();
+    const list = await openAddPicker();
+    if (!list) throw new Error("REF_ATTACH_FAILED: 点开“添加素材”后没有出现素材面板，未提交");
+    if (byName(list)) {
+      results.push({ name, uploaded: false });
+      continue;
+    }
+    await uploadIntoOpenPicker(imgPath);
+    const started = Date.now();
+    let ready = false;
+    let delivered = 0;
+    for (let k = 1; ; k++) {
+      await page.waitForTimeout(k === 1 ? 3000 : 2000);
+      if ((await composerChips()).length) {
+        delivered += await pruneComposer([]);
+        ready = true;
+      }
+      // 面板不一定自动刷新，隔几次关掉重开
+      if (k % 6 === 0) await closePicker();
+      const lst = (await readPickerAssets()) || (await openAddPicker());
+      if (readyOpt(lst, name)) ready = true;
+      if (ready) break;
+      if (Date.now() - started > REF_PROCESS_WAIT_MS) {
+        throw new Error(`REF_ATTACH_FAILED: 上传 ${Math.round(REF_PROCESS_WAIT_MS / 60000)} 分钟后 Flow 仍未处理完 ${name}，未提交；稍后重跑会直接复用已上传的图。页面上的列表：${JSON.stringify(await listboxDiag()).slice(0, 300)}`);
+      }
+    }
+    // 处理完后的自动挂图可能晚几秒才到：再等一会，到了就移除
+    const tail = Date.now() + 20000;
+    while (!delivered && Date.now() < tail) {
+      await page.waitForTimeout(2000);
+      if ((await composerChips()).length) delivered += await pruneComposer([]);
+    }
+    results.push({ name, uploaded: true, ready_after_s: Math.round((Date.now() - started) / 1000), auto_attach_removed: delivered });
+  }
+  await closePicker();
+  return results;
+}
+
+// 第二步（设置模型后）：逐张在资源列表里按唯一文件名点选，确认高亮的是它，再“添加到提示”，核对附件的素材地址。
+async function attachRefImages(refImages) {
+  const results = [];
+  for (let i = 0; i < refImages.length; i++) {
+    const name = path.basename(refImages[i]);
+    // 列表不一定自动刷新、迟到的自动挂图会把图藏起来：反复读，隔几次关掉面板重开，并移除不是本次的附件
+    const waitOpt = async (ms) => {
+      const dl = Date.now() + ms;
+      for (let k = 1; ; k++) {
+        if (k % 5 === 0) {
+          await closePicker();
+          await pruneComposer(CFG.expected_ref_assets);
+        }
+        const lst = (await readPickerAssets()) || (await openAddPicker());
+        const o = readyOpt(lst, name);
+        if (o) return o;
+        if (Date.now() > dl) return null;
+        await page.waitForTimeout(1000);
+      }
+    };
+    const notFound = async () => new Error(`REF_ATTACH_FAILED: 资源列表里找不到已入库的 ${name}，未提交；页面上的列表：${JSON.stringify(await listboxDiag()).slice(0, 400)}；输入框附件 ${(await composerChips()).length} 张`);
+    await closePicker();
+    await pruneComposer(CFG.expected_ref_assets);
+    if (!(await openAddPicker())) throw new Error("REF_ATTACH_FAILED: 点开“添加素材”后没有出现素材面板，未提交");
+    // 点选目标：点一下未高亮的项只把它设为高亮（asset-item-active），“添加到提示”加入的就是高亮项；
+    // 点一下已高亮的项会直接加入输入框并关掉面板（新上传的图常常已是高亮，2026-11-27 实测），所以点之前先看高亮。
+    const chipCount = async (base) => (await composerChips()).filter(c => assetBase(c.img) === base).length;
+    let target = null;
+    let want = null;
+    let addedBy = null;
+    for (let attempt = 0; attempt < 3 && !addedBy; attempt++) {
+      if (!(await waitOpt(attempt === 0 ? 60000 : 15000))) throw await notFound();
+      await page.evaluate((nm) => {
+        const o = [...document.querySelectorAll('[role="listbox"] [role="option"]')].find(x => !/正在上传|uploading/i.test(x.innerText || '') && (x.innerText || '').includes(nm));
+        o?.scrollIntoView({ block: 'center' });
+      }, name);
+      await page.waitForTimeout(400);
+      target = await waitOpt(15000);
+      if (!target) throw await notFound();
+      want = assetBase(target.img);
+      const before = await chipCount(want);
+      let active = await activeAssetTexts();
+      const isOurs = () => active.length === 1 && active[0].includes(name);
+      if (!isOurs()) {
+        await page.mouse.click(target.x, target.y, { label: "highlight reference asset" });
+        await page.waitForTimeout(900);
+        if ((await chipCount(want)) > before) { addedBy = 'click'; break; }
+        active = await activeAssetTexts();
+        if (!isOurs()) continue;
+      }
+      const addRect = await page.evaluate(() => {
+        const b = [...document.querySelectorAll('button')].find(x => {
+          const r = x.getBoundingClientRect();
+          const t = (x.innerText || '').trim();
+          return r.width > 0 && r.height > 0 && !x.disabled && (t === '添加到提示' || t === 'Add to prompt');
+        });
+        if (!b) return null;
+        const r = b.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      if (!addRect) throw new Error("REF_ATTACH_FAILED: 素材面板里没找到“添加到提示”按钮，未提交");
+      await page.mouse.click(addRect.x, addRect.y, { label: "add highlighted reference to prompt" });
+      const chipDeadline = Date.now() + 8000;
+      while (Date.now() < chipDeadline) {
+        await page.waitForTimeout(500);
+        if ((await chipCount(want)) > before) { addedBy = 'add_to_prompt'; break; }
+      }
+      if (!addedBy) throw new Error(`REF_ATTACH_FAILED: 点“添加到提示”后，输入框里没出现 ${name} 这张素材，未提交`);
+    }
+    // 输入框里这张素材必须正好一张（同一张挂两次也不行）
+    const finalCount = want ? await chipCount(want) : 0;
+    const ok = !!addedBy && finalCount === 1;
+    results.push({ name, added_by: addedBy, same_asset: ok, verified: ok });
+    if (!ok) {
+      throw new Error(`REF_ATTACH_FAILED: 没能把 ${name} 挂进输入框（方式=${addedBy}，输入框里这张素材 ${finalCount} 张），未提交`);
+    }
+    CFG.expected_ref_assets.push(want);
+    await closePicker();
+  }
+  return results;
+}
+
+// 提交前最后一道：移除不是本次的附件（含迟到的自动挂图），再核对输入框正好是本次的参考图（没有参考图时必须为空）
+async function verifyComposerRefs() {
+  const expected = CFG.expected_ref_assets;
+  const removed = await pruneComposer(expected);
+  const chips = await composerChips();
+  const bases = chips.map(c => assetBase(c.img));
+  const ok = chips.length === expected.length && expected.every(e => bases.includes(e));
+  if (!ok) {
+    throw new Error(`COMPOSER_NOT_CLEAN: 提交前核对输入框素材不符：应为 ${expected.length} 张本次参考图，实际 ${chips.length} 张，已中止，未提交`);
+  }
+  return { count: chips.length, removed };
+}
+"""
+
 ENSURE_PROJECT_JS = r"""
+// 打开项目后一律读页面上的项目名核对（2026-11-27 事故：缓存的旧项目地址盖过了指定的项目名，三次都跑进了共用项目）
+async function readProjectTitle() {
+  return await page.evaluate(() => {
+    const input = document.querySelector('input[aria-label="可编辑文本"]');
+    const v = ((input && input.value) || '').trim();
+    if (v) return v;
+    return (document.title || '').replace(/^Google Flow\s*[-–]\s*/, '').trim();
+  });
+}
+
+async function openProjectPage(url) {
+  await page.goto(url, { timeout: 30000 });
+  await page.waitForFunction(
+    () => !!document.querySelector('button[aria-label="设置触发器"]') || location.hostname.includes('accounts.google.com'),
+    undefined,
+    { timeout: 30000 }
+  );
+  const u = await page.url();
+  if (u.includes('accounts.google.com')) throw new Error("NOT_LOGGED_IN:" + u);
+  // 标题输入框可能比设置按钮晚渲染
+  await page.waitForFunction(() => {
+    const i = document.querySelector('input[aria-label="可编辑文本"]');
+    return !!(i && i.value) || /Google Flow\s*[-–]\s*\S/.test(document.title || '');
+  }, undefined, { timeout: 8000 }).catch(() => {});
+  const title = await readProjectTitle();
+  // 读不到名字时不能当成“对不上”去新建项目，否则页面改版会刷出一堆空项目
+  if (!title) throw new Error("PROJECT_MISMATCH: 打开项目后读不到项目名称（页面可能改版），已中止，未提交：" + u);
+  return { url: u, title };
+}
+
+function projectResolved(info, source) {
+  CFG.resolved_project_url = info.url;
+  CFG.resolved_project_name = info.title;
+  CFG.project_source = source;
+  return info.url;
+}
+
 async function ensureProject() {
+  const want = CFG.project_name;
+  const rejected = [];
   if (CFG.project_url) {
-    await page.goto(CFG.project_url, { timeout: 30000 });
-    await page.waitForFunction(
-      () => !!document.querySelector('button[aria-label="设置触发器"]') || location.hostname.includes('accounts.google.com'),
-      undefined,
-      { timeout: 30000 }
-    );
-    const u = await page.url();
-    if (u.includes('accounts.google.com')) throw new Error("NOT_LOGGED_IN:" + u);
-    return u;
+    const info = await openProjectPage(CFG.project_url);
+    if (!CFG.project_expect || info.title === want) return projectResolved(info, CFG.project_url_source || 'explicit');
+    if (CFG.project_url_source === 'explicit') {
+      throw new Error(`PROJECT_MISMATCH: --project-url 打开的项目叫“${info.title}”，不是要求的“${want}”，已中止，未提交`);
+    }
+    // 缓存地址对应的项目名对不上：不用它，改按名字找
+    rejected.push({ url: info.url, title: info.title });
   }
 
-  // 访问首页，查找是否已存在同名专用项目；无则新建并重命名
+  // 访问首页，按名字找同名项目；打开后再核对一次名字（卡片文字只做初筛）
   await page.goto("https://flow.google.com/", { timeout: 30000 });
   await page.waitForFunction(
     () => document.body.innerText.includes('新建项目') || document.body.innerText.includes('New project') || location.hostname.includes('accounts.google.com'),
@@ -476,25 +795,28 @@ async function ensureProject() {
   if (homeUrl.includes('accounts.google.com')) throw new Error("NOT_LOGGED_IN:" + homeUrl);
   await page.waitForTimeout(1200);
 
-  const existingHref = await page.evaluate((targetName) => {
-    const anchors = [...document.querySelectorAll('a[href*="/project/"]')];
-    for (const a of anchors) {
-      const card = a.parentElement;
-      const text = card ? card.innerText : '';
-      if (text.includes(targetName)) {
-        return a.href;
-      }
+  const candidates = await page.evaluate((targetName) => {
+    const out = [];
+    for (const a of document.querySelectorAll('a[href*="/project/"]')) {
+      const text = a.parentElement ? a.parentElement.innerText : '';
+      if (text.includes(targetName) && !out.includes(a.href)) out.push(a.href);
     }
-    return null;
-  }, CFG.project_name);
-
-  if (existingHref) {
-    await page.goto(existingHref, { timeout: 30000 });
-    await page.waitForFunction(() => !!document.querySelector('button[aria-label="设置触发器"]'), undefined, { timeout: 30000 });
-    return await page.url();
+    return out.slice(0, 5);
+  }, want);
+  for (const href of candidates) {
+    if (rejected.some(r => r.url === href)) continue;
+    const info = await openProjectPage(href);
+    if (info.title === want) {
+      CFG.project_rejected = rejected;
+      return projectResolved(info, 'search');
+    }
+    rejected.push({ url: info.url, title: info.title });
   }
 
   // 新建专用项目
+  await page.goto("https://flow.google.com/", { timeout: 30000 });
+  await page.waitForFunction(() => document.body.innerText.includes('新建项目') || document.body.innerText.includes('New project'), undefined, { timeout: 30000 });
+  await page.waitForTimeout(800);
   const created = await page.evaluate(() => {
     const btns = [...document.querySelectorAll('button')];
     const target = btns.find(b => b.innerText.includes('新建项目') || b.innerText.includes('New project'));
@@ -513,16 +835,22 @@ async function ensureProject() {
   );
   await page.waitForTimeout(800);
 
-  // 重命名为专用项目名，方便后续复用
+  // 重命名为要求的项目名，并读回核对
   const hasTitleInput = await page.evaluate(() => !!document.querySelector('input[aria-label="可编辑文本"]'));
   if (hasTitleInput) {
     await page.click('css=input[aria-label="可编辑文本"]', { label: "rename studio project" });
     await page.keyboard.press("ControlOrMeta+A");
-    await page.keyboard.insertText(CFG.project_name);
+    await page.keyboard.insertText(want);
     await page.keyboard.press("Enter");
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(800);
   }
-  return await page.url();
+  const newUrl = await page.url();
+  const title = await readProjectTitle();
+  if (title !== want) {
+    throw new Error(`PROJECT_MISMATCH: 新建项目后改名没成功（页面上叫“${title}”，要求“${want}”），已中止，未提交：${newUrl}`);
+  }
+  CFG.project_rejected = rejected;
+  return projectResolved({ url: newUrl, title }, 'created');
 }
 """
 
@@ -568,6 +896,7 @@ async function readCreditsQuick() {{
 
 {ENSURE_PROJECT_JS}
 {BIND_FRAMES_JS}
+{ATTACH_REFS_JS}
 // Flow 新版项目页默认开启“Flow 智能体”，此时经典输入区的“设置触发器”被隐藏（display:none）。
 // 打开设置前先确认按钮可见，不可见就关掉智能体开关；结束时在 finally 里尽量恢复原状。
 let __agentModeTurnedOff = false;
@@ -731,118 +1060,6 @@ async function configureSettings() {{
     model: selectedModel,
     ...costInfo,
   }};
-}}
-
-async function uploadRefImages(refImages) {{
-  const uploaded = [];
-  for (const imgPath of refImages) {{
-    const beforeAsbCount = await page.evaluate(() => new Set([...document.querySelectorAll('img')].map(i => i.src || '').filter(s => s.includes('/asb/'))).size);
-    // 确保任何旧弹层已关闭，先按一次 Escape
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(300);
-
-    // 兼容图片/素材模式的“在提示框中添加素材”按钮与视频帧模式的首帧入口
-    const openBtnRect = await page.evaluate(() => {{
-      const direct = document.querySelector('button[aria-label="在提示框中添加素材"], button[aria-label*="Add media"], button[aria-label*="添加素材"]');
-      if (direct) {{
-        const r = direct.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) return {{ x: r.left + r.width / 2, y: r.top + r.height / 2, kind: "direct" }};
-      }}
-      const btns = [...document.querySelectorAll('button')];
-      const frameBtn = btns.find(b => {{
-        const r = b.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) return false;
-        const txt = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).trim();
-        return /^(开始|首帧|Start|First frame)/i.test(txt) || /添加首帧|Start frame/i.test(txt);
-      }});
-      if (frameBtn) {{
-        const r = frameBtn.getBoundingClientRect();
-        return {{ x: r.left + r.width / 2, y: r.top + r.height / 2, kind: "frame" }};
-      }}
-      return null;
-    }});
-    if (!openBtnRect) {{
-      throw new Error("未找到“在提示框中添加素材”或视频首帧入口按钮");
-    }}
-    await page.mouse.click(openBtnRect.x, openBtnRect.y);
-
-    // 等待可见的“上传媒体”按钮出现并稳定
-    await page.waitForFunction(() => {{
-      return [...document.querySelectorAll('button')].some(b => {{
-        const r = b.getBoundingClientRect();
-        return r.width > 0 && r.height > 0 && (b.innerText.includes('上传媒体') || /upload media/i.test(b.innerText));
-      }});
-    }}, undefined, {{ timeout: 8000 }});
-    await page.waitForTimeout(400);
-
-    let chooser = null;
-    for (let attempt = 0; attempt < 2; attempt++) {{
-      const uploadRect = await page.evaluate(() => {{
-        const btns = [...document.querySelectorAll('button')];
-        const u = btns.find(b => {{
-          const r = b.getBoundingClientRect();
-          return r.width > 0 && r.height > 0 && (b.innerText.includes('上传媒体') || /upload media/i.test(b.innerText));
-        }});
-        if (!u) return null;
-        const r = u.getBoundingClientRect();
-        return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }};
-      }});
-      if (!uploadRect) {{
-        throw new Error("在添加素材弹层中未找到可见的“上传媒体”按钮");
-      }}
-      try {{
-        // 必须使用真实鼠标点击触发可信用户手势（Trusted User Activation），否则 Chromium 会拦截文件选择框
-        const [fc] = await Promise.all([
-          page.waitForFileChooser({{ timeout: 10000 }}),
-          page.mouse.click(uploadRect.x, uploadRect.y),
-        ]);
-        chooser = fc;
-        break;
-      }} catch (e) {{
-        if (attempt === 1) throw e;
-        await page.waitForTimeout(800);
-      }}
-    }}
-
-    await chooser.setFiles(imgPath);
-
-    // 等待参考图真正上传完毕（页面出现新的 /asb/ 资源或进度消失，最多等 20s）
-    const uploadDeadline = Date.now() + 20000;
-    while (Date.now() < uploadDeadline) {{
-      await page.waitForTimeout(1000);
-      const status = await page.evaluate((prevCnt) => {{
-        const urls = new Set([...document.querySelectorAll('img')].map(i => i.src || '').filter(s => s.includes('/asb/')));
-        const uploading = /正在上传|uploading/i.test(document.body.innerText || '');
-        const promptBox = document.querySelector('[role="textbox"]')?.closest('div')?.parentElement;
-        const promptImgs = promptBox ? [...promptBox.querySelectorAll('img')].filter(i => (i.src || '').includes('/asb/') || (i.src || '').startsWith('blob:') || (i.src || '').startsWith('data:')).length : 0;
-        return {{ curCnt: urls.size, uploading, promptImgs }};
-      }}, beforeAsbCount);
-      if (!status.uploading && (status.curCnt > beforeAsbCount || status.promptImgs > uploaded.length)) {{
-        break;
-      }}
-    }}
-    await page.waitForTimeout(1500);
-
-    // 若弹层仍打开且存在可点击的“添加到提示”按钮则真实点击
-    const addRect = await page.evaluate(() => {{
-      const btns = [...document.querySelectorAll('button')];
-      const addBtn = btns.find(b => {{
-        const r = b.getBoundingClientRect();
-        return r.width > 0 && r.height > 0 && !b.disabled && (b.innerText.trim() === '添加到提示' || b.innerText.trim() === 'Add to prompt');
-      }});
-      if (!addBtn) return null;
-      const r = addBtn.getBoundingClientRect();
-      return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }};
-    }});
-    if (addRect) {{
-      await page.mouse.click(addRect.x, addRect.y);
-      await page.waitForTimeout(800);
-    }}
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(500);
-    uploaded.push(imgPath);
-  }}
-  return uploaded;
 }}
 
 async function fillPrompt(promptText) {{
@@ -1213,6 +1430,11 @@ let payload = {{ ok: false }};
 try {{
   const projectUrl = await ensureProject();
   CFG.resolved_project_url = projectUrl;
+  CFG.expected_ref_assets = [];
+  const isFrameMode = CFG.mode === 'video' && CFG.video_type === '帧';
+  const composerCheck = await ensureEmptyComposer();
+  // 图片、素材模式：先把还没入库的参考图传上去并刷新页面，再设模型（刷新后设置不受影响）
+  const refUpload = (!isFrameMode && CFG.ref_images.length) ? await preUploadRefs(CFG.ref_images) : null;
 
   const creditsBefore = await readCreditsQuick();
   const settings = await configureSettings();
@@ -1239,8 +1461,10 @@ try {{
     }};
   }} else if (CFG.dry_run) {{
     // 帧模式干跑也真实上传并核对首/尾帧绑定（不提交、不扣点），提前暴露绑定失败
-    const frameBinding = (CFG.mode === 'video' && CFG.video_type === '帧' && CFG.ref_images.length)
-      ? await bindVideoFrames(CFG.ref_images) : null;
+    const frameBinding = (isFrameMode && CFG.ref_images.length) ? await bindVideoFrames(CFG.ref_images) : null;
+    // 图片、视频素材模式的参考图同样真实挂进输入框并核对素材地址（不提交、不扣点）
+    const refAttach = (!isFrameMode && CFG.ref_images.length) ? await attachRefImages(CFG.ref_images) : null;
+    if (!isFrameMode) await verifyComposerRefs();
     // 帧模式干跑同时拍一次生成前基线，核对网格最新几张卡都已纳入（真跑靠它判断哪张是新成品）
     let baselinePreview = null;
     if (frameBinding) {{
@@ -1256,13 +1480,16 @@ try {{
       max_credits: CFG.max_credits,
       settings,
       frame_binding: frameBinding,
+      ref_upload: refUpload,
+      ref_attach: refAttach,
+      composer_check: composerCheck,
       baseline_preview: baselinePreview,
     }};
   }} else {{
-    // 若需要上传参考图，先上传
-    const isFrameMode = CFG.mode === 'video' && CFG.video_type === '帧';
+    // 参考图：帧模式绑首/尾帧；图片、素材模式按唯一文件名点选并核对输入框附件
     const frameBinding = (isFrameMode && CFG.ref_images.length) ? await bindVideoFrames(CFG.ref_images) : null;
-    const uploadedRefs = isFrameMode ? CFG.ref_images.slice() : (CFG.ref_images.length ? await uploadRefImages(CFG.ref_images) : []);
+    const refAttach = (!isFrameMode && CFG.ref_images.length) ? await attachRefImages(CFG.ref_images) : null;
+    const uploadedRefs = CFG.ref_images.slice();
 
     // 切换到对应类型导航，获取生成前已有媒体基线（避免把参考图或旧素材误判为新生成成品）
     const baseline = await captureBaseline(uploadedRefs.length > 0);
@@ -1278,6 +1505,9 @@ try {{
     const countProgress = (txt) => (txt.match(/(^|[^0-9])[0-9]{{1,2}}%/gm) || []).length;
     const progressBaseline = countProgress(preSubmitText);
     const isGenerating = (txt) => countProgress(txt) > progressBaseline || txt.includes('正在生成');
+
+    // 提交前最后核对一次：输入框附件必须正好是本次的参考图（没有参考图时必须为空）
+    const composerFinal = isFrameMode ? null : await verifyComposerRefs();
 
     // 点击开始生成（优先精确 aria-label 真实点击）
     await page.click('css=button[aria-label="开始生成"]', {{ label: "submit Flow generation", timeout: 8000 }});
@@ -1373,6 +1603,9 @@ try {{
       prompt: CFG.prompt,
       uploaded_refs: uploadedRefs,
       frame_binding: frameBinding,
+      ref_upload: refUpload,
+      ref_attach: refAttach,
+      composer_check: {{ ...composerCheck, before_submit: composerFinal }},
       pick_diag: pickDiag,
       credits_before: creditsBefore,
       estimated_credits: settings.estimated_credits,
@@ -1386,6 +1619,9 @@ try {{
   let error = msg.includes("NOT_LOGGED_IN:") ? "not_logged_in"
     : msg.includes("FRAME_BIND_FAILED:") ? "frame_bind_failed"
     : msg.includes("RESULT_PICK_MISMATCH:") ? "result_pick_mismatch"
+    : msg.includes("PROJECT_MISMATCH:") ? "project_mismatch"
+    : msg.includes("REF_ATTACH_FAILED:") ? "ref_attach_failed"
+    : msg.includes("COMPOSER_NOT_CLEAN:") ? "composer_not_clean"
     : "runtime_error";
   let message = msg;
   // 页面自动化按简体中文界面文案定位控件：找不到控件、且页面上没有任何中文控件标签时，说明界面语言不对
@@ -1404,6 +1640,10 @@ try {{
       await task.finish({{ keep: [] }});
     }} catch (_) {{}}
   }}
+}}
+if (CFG.resolved_project_name) {{
+  payload.project = {{ name: CFG.resolved_project_name, source: CFG.project_source, url: CFG.resolved_project_url }};
+  if (CFG.project_rejected && CFG.project_rejected.length) payload.project.rejected = CFG.project_rejected;
 }}
 console.log(RESULT_MARKER + JSON.stringify(payload));
 """
@@ -1636,7 +1876,9 @@ try {
   if (err && err.directFallback) {
     payload = { ok: false, transport: 'direct', fallback: true, fallback_reason: err.message, timings };
   } else {
-    let error = msg.includes('NOT_LOGGED_IN:') ? 'not_logged_in' : (err && err.directSent ? 'direct_post_unknown' : 'runtime_error');
+    let error = msg.includes('NOT_LOGGED_IN:') ? 'not_logged_in'
+      : msg.includes('PROJECT_MISMATCH:') ? 'project_mismatch'
+      : (err && err.directSent ? 'direct_post_unknown' : 'runtime_error');
     let message = (err && err.directSent) ? err.message : msg;
     if (error === 'runtime_error' && /未找到|未在.*找到/.test(msg)) {
       try {
@@ -1658,6 +1900,10 @@ try {
   }
 }
 timings.total_ms = Date.now() - T0;
+if (CFG.resolved_project_name) {
+  payload.project = { name: CFG.resolved_project_name, source: CFG.project_source, url: CFG.resolved_project_url };
+  if (CFG.project_rejected && CFG.project_rejected.length) payload.project.rejected = CFG.project_rejected;
+}
 console.log(RESULT_MARKER + JSON.stringify(payload));
 """
 
@@ -1698,7 +1944,8 @@ BASE_PARAMS: dict[str, Any] = {
     "ref_image": [],
     "name": None,
     "project_url": None,
-    "project_name": DEFAULT_PROJECT_NAME,
+    "project_name": None,
+    "keep_layout": False,
     "allow_unknown_cost": False,
     "dry_run": False,
     "transport": "auto",
@@ -1706,7 +1953,7 @@ BASE_PARAMS: dict[str, Any] = {
 PLAN_KEYS = {
     "id", "mode", "prompt", "aspect", "count", "model", "thinking", "video_type",
     "resolution", "duration", "ref_image", "name", "max_credits", "timeout", "project_url",
-    "project_name", "allow_unknown_cost", "transport",
+    "project_name", "allow_unknown_cost", "transport", "keep_layout",
 }
 PREVIEW_DIRNAME = "_preview"
 IMAGE_PREVIEW_EDGE = 512
@@ -1885,7 +2132,7 @@ def compact_result(result: dict[str, Any]) -> dict[str, Any]:
         out["credits"] = credits
     files = []
     for item in result.get("files") or []:
-        entry = {k: item.get(k) for k in ("path", "preview", "variant", "width", "height", "duration", "first_frame_ssim", "last_frame_ssim")}
+        entry = {k: item.get(k) for k in ("path", "preview", "variant", "width", "height", "duration", "first_frame_ssim", "last_frame_ssim", "ref_ssim")}
         files.append({k: v for k, v in entry.items() if v is not None})
     if files:
         out["files"] = files
@@ -1894,8 +2141,12 @@ def compact_result(result: dict[str, Any]) -> dict[str, Any]:
         warnings.append(str(result["warning"]))
     if warnings:
         out["warnings"] = warnings
-    # 帧模式绑定核对、生成前基线、选中成品的诊断：字段很小，直接透传
-    for key in ("frame_binding", "baseline_preview", "pick_diag"):
+    # 实际打开的项目（名字读自页面）：每次都核对是不是要的那个
+    project = result.get("project") or {}
+    if project.get("name"):
+        out["project"] = {k: project[k] for k in ("name", "source", "rejected") if project.get(k)}
+    # 帧模式绑定核对、参考图挂载核对、生成前基线、选中成品的诊断：字段很小，直接透传
+    for key in ("frame_binding", "ref_upload", "ref_attach", "baseline_preview", "pick_diag"):
         if result.get(key):
             out[key] = result[key]
     if result.get("transport"):
@@ -1956,10 +2207,11 @@ DURATION_TOLERANCE_S = 1.5  # 实测请求 4 秒下载为 4.03 秒
 
 
 def unique_upload_copy(src: Path) -> str:
-    """复制成 `<原名>-<内容哈希8位><扩展名>`：文件名唯一对应内容，避免点选到同名旧图。"""
+    """复制成 `<原名前 12 字>-<内容哈希8位><扩展名>`：文件名唯一对应内容，避免点选到同名旧图。
+    素材列表会把超过约 32 字的名字截成“…”，所以原名只留前 12 字，整个名字不超过 26 字。"""
     digest = hashlib.sha256(src.read_bytes()).hexdigest()[:8]
     UPLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    dst = UPLOAD_CACHE_DIR / f"{src.stem}-{digest}{src.suffix.lower()}"
+    dst = UPLOAD_CACHE_DIR / f"{src.stem[:12]}-{digest}{src.suffix.lower()[:5]}"
     if not dst.exists():
         shutil.copyfile(src, dst)
     return str(dst)
@@ -1998,11 +2250,59 @@ def verify_frames(result: dict[str, Any], ref_images: list[str]) -> None:
         )
 
 
+# 图片参考图核对：成品与参考图缩到 64×36 灰度后的 SSIM（2026-11-27 校准）：
+# 挂错参考图（成品是另一张图改出来的）0.03～0.10；真实换环境成品（黑底换成雪原、戈壁，机器不变）0.23～0.24。
+REF_SIMILARITY_MIN = 0.15
+
+
+def image_similarity(a: str, b: str) -> float | None:
+    """两张图缩到 64×36 灰度后的 SSIM；ffmpeg 不可用或失败时返回 None。"""
+    graph = "[0:v]scale=64:36,format=gray[a];[1:v]scale=64:36,format=gray[b];[a][b]ssim=stats_file=-"
+    proc = run_quiet(["ffmpeg", "-v", "error", "-i", a, "-i", b, "-filter_complex", graph, "-f", "null", "-"], timeout=60)
+    if not proc:
+        return None
+    m = re.search(r"All:([0-9.]+)", proc.stdout or "")
+    return round(float(m.group(1)), 3) if m else None
+
+
+def verify_image_refs(result: dict[str, Any], ref_images: list[str], keep_layout: bool) -> None:
+    """图片模式带参考图时，比对成品与参考图的整体结构。
+    keep_layout（改这张图、构图要保留）时差异过大判 ref_mismatch 并停批量；否则只给警告（人物/风格参考本来就会换构图）。"""
+    low = []
+    for item in result.get("files") or []:
+        path = item.get("path")
+        if not path:
+            continue
+        scores = [v for v in (image_similarity(path, r) for r in ref_images) if v is not None]
+        if not scores:
+            continue
+        item["ref_ssim"] = max(scores)
+        if item["ref_ssim"] < REF_SIMILARITY_MIN:
+            low.append(f"{Path(path).name} 与参考图结构相似度 {item['ref_ssim']}")
+    if not low:
+        return
+    if keep_layout:
+        result.update(
+            ok=False,
+            error="ref_mismatch",
+            message="成品和参考图对不上（要求保留构图）：" + "；".join(low)
+            + "。多半是照着别的图改的，批量已停；先看成品和 ref_attach，查清原因再跑。",
+        )
+        return
+    note = "成品和参考图结构差异很大（" + "；".join(low) + "）：如果本意是改这张图、保留构图，多半挂错了参考图，先核对再继续"
+    result["warning"] = f"{result['warning']}；{note}" if result.get("warning") else note
+
+
+def project_label(result: dict[str, Any]) -> str:
+    """结果里实际打开的项目名（读自页面），没有时退回默认项目名。"""
+    return str((result.get("project") or {}).get("name") or DEFAULT_PROJECT_NAME)
+
+
 def flag_reused_label(result: dict[str, Any]) -> None:
     """选中卡片的标题在生成前就存在时加警告：首帧比对和时长核对分不出同首尾帧、同时长的旧视频。"""
     if not result.get("ok") or not (result.get("pick_diag") or {}).get("label_seen_before"):
         return
-    note = f"选中的视频标题在生成前就已存在，可能拿到了旧视频：到专用项目“{DEFAULT_PROJECT_NAME}”视频栏核对第一张"
+    note = f"选中的视频标题在生成前就已存在，可能拿到了旧视频：到项目“{project_label(result)}”视频栏核对第一张"
     result["warning"] = f"{result['warning']}；{note}" if result.get("warning") else note
 
 
@@ -2022,7 +2322,7 @@ def verify_duration(result: dict[str, Any], wanted: Any) -> None:
             ok=False,
             error="result_mismatch",
             message=f"下载到的视频与请求的 {want:g} 秒不符（点数已扣）：" + "；".join(bad)
-            + f"。多半拿错了项目里的旧视频，不要重跑；到 Flow 专用项目“{DEFAULT_PROJECT_NAME}”视频栏取最新一条。批量已停。",
+            + f"。多半拿错了项目里的旧视频，不要重跑；到 Flow 项目“{project_label(result)}”视频栏取最新一条。批量已停。",
         )
 
 
@@ -2116,6 +2416,43 @@ def normalize_choices(params: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def cached_project_url(state: dict[str, Any], name: str) -> str | None:
+    """按项目名取缓存的项目地址；名字对不上就不用（2026-11-27 事故：旧缓存地址盖过了指定的项目名）。"""
+    projects = state.get("projects")
+    if isinstance(projects, dict) and projects.get(name):
+        return str(projects[name])
+    if state.get("project_name") == name and state.get("default_project_url"):
+        return str(state["default_project_url"])
+    return None
+
+
+def resolve_project_target(params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """决定这次打开哪个项目，以及打开后要核对的名字。
+    - 显式 --project-url：照用；同时显式给了 --project-name 时名字必须一致，否则 project_mismatch。
+    - 否则：只用同名项目的缓存地址，打开后名字仍对不上就改按名字找，找不到就新建。"""
+    name_given = params.get("project_name")
+    want = str(name_given or DEFAULT_PROJECT_NAME)
+    if params.get("project_url"):
+        return {"project_url": params["project_url"], "project_name": want, "project_url_source": "explicit", "project_expect": bool(name_given)}
+    cached = cached_project_url(state, want)
+    return {"project_url": cached, "project_name": want, "project_url_source": "cache" if cached else None, "project_expect": True}
+
+
+def remember_project(result: dict[str, Any], explicit_url: bool) -> None:
+    """把页面上读到的项目名和地址记进状态文件（只记实际打开、名字已核对过的项目）。"""
+    project = result.get("project") or {}
+    name, url = project.get("name"), project.get("url")
+    if not name or not url or "/project/" not in str(url):
+        return
+    state = load_state()
+    projects = state.get("projects") if isinstance(state.get("projects"), dict) else {}
+    projects[str(name)] = str(url)
+    patch: dict[str, Any] = {"projects": projects, "updated_at": datetime.now().isoformat(timespec="seconds")}
+    if not explicit_url:
+        patch.update(default_project_url=str(url), project_name=str(name))
+    save_state(patch)
+
+
 def generate_once(params: dict[str, Any]) -> dict[str, Any]:
     """执行一次生图或生视频（含窗口守卫、下载、预览图），返回完整结果。"""
     params = normalize_choices(params)
@@ -2131,15 +2468,13 @@ def generate_once(params: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "error": "invalid_ref_image", "message": f"参考图不存在：{p}"}
         ref_images.append(str(p))
     frame_mode = mode == "video" and params.get("video_type") == "帧"
-    if frame_mode:
-        if len(ref_images) > 2:
-            return {"ok": False, "error": "invalid_ref_image", "message": "帧模式最多 2 张参考图：第 1 张首帧，第 2 张尾帧"}
-        # 资源列表按文件名点选：换成按内容哈希命名的副本，同名即同内容，可安全复用已上传素材
-        ref_images = [unique_upload_copy(Path(r)) for r in ref_images]
+    if frame_mode and len(ref_images) > 2:
+        return {"ok": False, "error": "invalid_ref_image", "message": "帧模式最多 2 张参考图：第 1 张首帧，第 2 张尾帧"}
+    # 资源列表按文件名点选：换成按内容哈希命名的副本，同名即同内容，可安全复用已上传素材
+    ref_images = [unique_upload_copy(Path(r)) for r in ref_images]
 
     guard_before = check_guard_or_fail()
-    state = load_state()
-    project_url = params.get("project_url") or state.get("default_project_url")
+    target = resolve_project_target(params, load_state())
 
     out_dir = Path(params.get("out_dir") or DEFAULT_OUT_DIR).expanduser().resolve()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2157,8 +2492,7 @@ def generate_once(params: dict[str, Any]) -> dict[str, Any]:
         "resolution": params.get("resolution"),
         "duration": int(params["duration"]) if params.get("duration") else None,
         "ref_images": ref_images,
-        "project_url": project_url,
-        "project_name": params.get("project_name") or DEFAULT_PROJECT_NAME,
+        **target,
         "out_dir": str(out_dir),
         "file_prefix": prefix,
         "max_credits": int(params["max_credits"]),
@@ -2185,8 +2519,9 @@ def generate_once(params: dict[str, Any]) -> dict[str, Any]:
                 guard_before = check_guard_or_fail()
 
     if result is None:
-        js = build_generate_js(guard_before, cfg)
-        result, notices = run_ego_node(js, timeout_sec=max(120, timeout + 90))
+        # 带参考图时，新上传的图在 Flow 端处理最多等 4 分钟（见 ATTACH_REFS_JS），总超时相应放宽
+        node_timeout = max(120, timeout + 90) + (330 if ref_images and not frame_mode else 0)
+        result, notices = run_ego_node(build_generate_js(guard_before, cfg), timeout_sec=node_timeout)
         result["transport"] = "ui"
         if fallback_reason:
             result["direct_fallback_reason"] = fallback_reason
@@ -2197,18 +2532,12 @@ def generate_once(params: dict[str, Any]) -> dict[str, Any]:
         verify_duration(result, params.get("duration"))
     if frame_mode and ref_images and result.get("ok") and not result.get("dry_run"):
         verify_frames(result, ref_images)
+    if mode == "image" and ref_images and result.get("ok") and not result.get("dry_run"):
+        verify_image_refs(result, ref_images, bool(params.get("keep_layout")))
     flag_reused_label(result)
 
-    # 自动记住专用项目 URL（仅在未显式覆盖 --project-url 时）
-    resolved_url = result.get("project_url")
-    if resolved_url and not params.get("project_url") and "/project/" in str(resolved_url):
-        save_state(
-            {
-                "default_project_url": resolved_url,
-                "project_name": cfg["project_name"],
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        )
+    # 记住页面上核对过名字的项目（项目名 → 地址）
+    remember_project(result, explicit_url=bool(params.get("project_url")))
 
     guard_after = window_guard.collect_state(space_prefix=RUN_SPACE_PREFIX)
     result["window_guard_after"] = {
@@ -2254,6 +2583,7 @@ def cmd_generate(args: argparse.Namespace, mode: str) -> int:
         "name": args.name,
         "project_url": args.project_url,
         "project_name": args.project_name,
+        "keep_layout": getattr(args, "keep_layout", False),
         "max_credits": args.max_credits,
         "allow_unknown_cost": args.allow_unknown_cost,
         "dry_run": args.dry_run,
@@ -2521,7 +2851,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help=f"下载目录（默认 {DEFAULT_OUT_DIR}）")
         p.add_argument("--name", default=None, help="自定义输出文件名前缀（不含扩展名）")
         p.add_argument("--project-url", default=None, help="指定现有 Flow 项目 URL（不传则自动复用专用项目）")
-        p.add_argument("--project-name", default=DEFAULT_PROJECT_NAME, help=f"专用项目名称（默认 {DEFAULT_PROJECT_NAME}）")
+        p.add_argument("--project-name", default=None, help=f"专用项目名称（默认 {DEFAULT_PROJECT_NAME}）；打开后按页面上的项目名核对")
         p.add_argument("--max-credits", type=int, default=d["max_credits"], help=f"允许消耗的最大点数上限（默认 {d['max_credits']}）")
         p.add_argument("--allow-unknown-cost", action="store_true", help="无法解析页面点数预估时是否继续（默认拦截）")
         p.add_argument("--dry-run", action="store_true", help="仅验证参数与预估点数消耗，不实际点击生成")
@@ -2530,6 +2860,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_img = sub.add_parser("image", help="通过 Google Flow 生成图片并下载到本地")
     add_common_gen_args(p_img, "image")
+    p_img.add_argument("--keep-layout", action="store_true", help="改这张参考图、构图要保留：成品与参考图结构差异过大时判 ref_mismatch（默认只警告）")
     p_img.add_argument("--thinking", choices=["低", "中", "高", "low", "medium", "high"], default=None, help="图片模型思考等级（低/中/高，或 low/medium/high）")
     p_img.add_argument(
         "--transport",

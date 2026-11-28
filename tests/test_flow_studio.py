@@ -862,5 +862,176 @@ class UiLanguageErrorTest(unittest.TestCase):
         self.assertIn("unsupported_ui_language", js)
 
 
+# ---------- 2026-11-27 参考图事故回归：项目名核对、参考图点选、成品比对 ----------
+
+
+class ProjectTargetTest(unittest.TestCase):
+    """缓存的项目地址只给同名项目用；显式地址照用，显式给了名字才强制核对。"""
+
+    def test_cached_url_requires_same_name(self):
+        state = {"default_project_url": "https://flow.google.com/project/old", "project_name": "Agent CLI Studio"}
+        t = MODULE.resolve_project_target({"project_name": "Demo Twin"}, state)
+        self.assertIsNone(t["project_url"])
+        self.assertEqual("Demo Twin", t["project_name"])
+        self.assertTrue(t["project_expect"])
+        t = MODULE.resolve_project_target({"project_name": None}, state)
+        self.assertEqual("https://flow.google.com/project/old", t["project_url"])
+        self.assertEqual("cache", t["project_url_source"])
+
+    def test_projects_map_is_keyed_by_name(self):
+        state = {"projects": {"A": "https://flow.google.com/project/a", "B": "https://flow.google.com/project/b"},
+                 "default_project_url": "https://flow.google.com/project/a", "project_name": "A"}
+        self.assertEqual("https://flow.google.com/project/b", MODULE.resolve_project_target({"project_name": "B"}, state)["project_url"])
+
+    def test_explicit_url_checks_name_only_when_given(self):
+        t = MODULE.resolve_project_target({"project_url": "https://flow.google.com/project/x", "project_name": None}, {})
+        self.assertEqual("explicit", t["project_url_source"])
+        self.assertFalse(t["project_expect"])
+        t = MODULE.resolve_project_target({"project_url": "https://flow.google.com/project/x", "project_name": "X"}, {})
+        self.assertTrue(t["project_expect"])
+
+    def test_remember_project_records_name_read_from_page(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(MODULE, "STATE_FILE", Path(tmp) / "state.json"):
+            MODULE.save_state({"default_project_url": "https://flow.google.com/project/shared", "project_name": "Demo Twin"})
+            MODULE.remember_project({"project": {"name": "Agent CLI Studio", "url": "https://flow.google.com/project/shared"}}, explicit_url=False)
+            state = MODULE.load_state()
+            self.assertEqual("Agent CLI Studio", state["project_name"])
+            self.assertEqual({"Agent CLI Studio": "https://flow.google.com/project/shared"}, state["projects"])
+            # 名字修正后，旧的错名不再命中这个地址
+            self.assertIsNone(MODULE.cached_project_url(state, "Demo Twin"))
+
+    def test_cli_project_name_defaults_to_none(self):
+        args = MODULE.build_parser().parse_args(["image", "--prompt", "x"])
+        self.assertIsNone(args.project_name)
+        self.assertFalse(args.keep_layout)
+        self.assertTrue(MODULE.build_parser().parse_args(["image", "--prompt", "x", "--keep-layout"]).keep_layout)
+
+
+class RefAttachScriptTest(unittest.TestCase):
+    """图片/素材模式参考图：不再直接点“添加到提示”，先按文件名点选，提交前核对输入框附件。"""
+
+    def test_old_blind_upload_is_gone_and_checks_precede_submit(self):
+        js = MODULE.build_generate_js(GUARD_CREATE, {**base_cfg("image"), "dry_run": False})
+        self.assertNotIn("uploadRefImages", js)
+        self.assertIn("attachRefImages", js)
+        self.assertIn("asset-item-active", js)
+        submit = js.index('label: "submit Flow generation"')
+        self.assertLess(js.index("await verifyComposerRefs()"), submit)
+        self.assertLess(js.index("await ensureEmptyComposer()"), js.index("await configureSettings()"))
+
+    def test_project_title_is_checked_after_open(self):
+        js = MODULE.build_generate_js(GUARD_CREATE, base_cfg("image"))
+        self.assertIn("PROJECT_MISMATCH", js)
+        self.assertIn('"project_mismatch"', js)
+        self.assertIn("payload.project = ", js)
+        direct = MODULE.build_direct_image_js(GUARD_CREATE, {**base_cfg("image"), "transport": "direct"})
+        self.assertIn("'project_mismatch'", direct)
+
+    def test_unique_upload_name_stays_short(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(MODULE, "UPLOAD_CACHE_DIR", Path(tmp) / "up"):
+            src = Path(tmp) / ("很长的参考图文件名" * 4 + ".png")
+            src.write_bytes(b"x")
+            name = Path(MODULE.unique_upload_copy(src)).name
+            self.assertLessEqual(len(name), 26)
+            self.assertTrue(name.endswith(".png"))
+
+    def test_compact_output_reports_project_and_attach(self):
+        out = MODULE.compact_result({
+            "ok": True,
+            "project": {"name": "Agent CLI Studio", "source": "cache", "url": "https://flow.google.com/project/x"},
+            "ref_attach": [{"name": "a-1234abcd.png", "verified": True}],
+            "files": [{"path": "/o/a.jpg", "ref_ssim": 0.55}],
+        })
+        self.assertEqual({"name": "Agent CLI Studio", "source": "cache"}, out["project"])
+        self.assertTrue(out["ref_attach"][0]["verified"])
+        self.assertEqual(0.55, out["files"][0]["ref_ssim"])
+
+
+@unittest.skipUnless(FFMPEG, "需要 ffmpeg")
+class ImageRefVerifyTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.ref, self.other = str(d / "ref.png"), str(d / "other.png")
+        run = lambda *a: subprocess.run(["ffmpeg", "-v", "error", "-y", *a], check=True)
+        run("-f", "lavfi", "-i", "testsrc2=s=640x360", "-frames:v", "1", self.ref)
+        run("-f", "lavfi", "-i", "smptebars=s=640x360", "-frames:v", "1", self.other)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_same_layout_passes(self):
+        result = {"ok": True, "files": [{"path": self.ref}]}
+        MODULE.verify_image_refs(result, [self.ref], keep_layout=True)
+        self.assertTrue(result["ok"])
+        self.assertGreater(result["files"][0]["ref_ssim"], 0.9)
+
+    def test_unrelated_output_warns_by_default(self):
+        result = {"ok": True, "files": [{"path": self.other}]}
+        MODULE.verify_image_refs(result, [self.ref], keep_layout=False)
+        self.assertTrue(result["ok"])
+        self.assertIn("挂错了参考图", result["warning"])
+
+    def test_unrelated_output_fails_when_layout_must_be_kept(self):
+        result = {"ok": True, "files": [{"path": self.other}]}
+        MODULE.verify_image_refs(result, [self.ref], keep_layout=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual("ref_mismatch", result["error"])
+
+    def test_batch_stops_after_ref_mismatch(self):
+        plan = Path(self.tmp.name) / "plan.json"
+        plan.write_text(json.dumps({"defaults": {"mode": "image", "keep_layout": True, "ref_image": self.ref},
+                                    "shots": [{"id": "a", "prompt": "x"}, {"id": "b", "prompt": "y"}]}), encoding="utf-8")
+        calls = []
+
+        def fake_generate(params):
+            calls.append(params["prompt"])
+            self.assertTrue(params["keep_layout"])
+            return {"ok": False, "error": "ref_mismatch", "message": "m"}
+
+        out = io.StringIO()
+        with mock.patch.object(MODULE, "generate_once", side_effect=fake_generate), contextlib.redirect_stdout(out):
+            MODULE.cmd_batch(MODULE.build_parser().parse_args(["batch", "--plan", str(plan), "--out-dir", self.tmp.name]))
+        self.assertEqual(["x"], calls)
+        summary = json.loads(out.getvalue())
+        self.assertEqual(["failed", "pending"], [s["status"] for s in summary["shots"]])
+
+
+class RefTimeoutTest(unittest.TestCase):
+    """带参考图走页面自动化时，总超时要留出 Flow 处理新上传图片的时间（最多 4 分钟）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ref = Path(self.tmp.name) / "ref.png"
+        self.ref.write_bytes(b"x")
+        patches = [
+            mock.patch.object(MODULE, "check_guard_or_fail", return_value=GUARD_CREATE),
+            mock.patch.object(MODULE.window_guard, "collect_state", return_value={"action": "create_agent_task_space"}),
+            mock.patch.object(MODULE, "load_state", return_value={}),
+            mock.patch.object(MODULE, "save_state"),
+            mock.patch.object(MODULE, "postprocess_files"),
+            mock.patch.object(MODULE, "UPLOAD_CACHE_DIR", Path(self.tmp.name) / "up"),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_ref_run_gets_longer_timeout_and_single_pass(self):
+        calls = []
+
+        def fake_node(js, timeout_sec=0):
+            calls.append(timeout_sec)
+            return {"ok": True, "dry_run": True, "ref_attach": [{"verified": True}]}, []
+
+        params = {**MODULE.BASE_PARAMS, **MODULE.MODE_DEFAULTS["image"], "mode": "image", "prompt": "a",
+                  "out_dir": self.tmp.name, "ref_image": [str(self.ref)], "dry_run": True, "timeout": 300}
+        with mock.patch.object(MODULE, "run_ego_node", side_effect=fake_node):
+            result = MODULE.generate_once(params)
+        self.assertEqual([300 + 90 + 330], calls)
+        self.assertTrue(result["ok"])
+        self.assertIn("pruneComposer(expected)", MODULE.ATTACH_REFS_JS)
+
+
 if __name__ == "__main__":
     unittest.main()

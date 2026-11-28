@@ -6,7 +6,7 @@ description: Use when the user wants images or videos from Google Flow (Nano Ban
 
 # Flow Studio
 
-脚本：与这份 SKILL.md 同目录的 `flow_studio.py`（安装方式不同，目录也不同；Claude Code 加载 skill 时会给出 Base directory）。要求 macOS、Ego Lite 已登录 Google Flow，且 Flow 界面为简体中文；报 `unsupported_ui_language` 时请用户把 Google 账号显示语言切到简体中文。一条命令完成，读取单行 JSON 即可。脚本内部已执行 Ego Lite 窗口守卫（同目录 `ego_lite_window_guard.py`）并按其 action 处理，调用前不必另跑；还会复用 Flow 里的专用项目（默认“Agent CLI Studio”，环境变量 `FLOW_STUDIO_PROJECT` 可改）、下载原图、生成预览图。
+脚本：与这份 SKILL.md 同目录的 `flow_studio.py`（安装方式不同，目录也不同；Claude Code 加载 skill 时会给出 Base directory）。要求 macOS、Ego Lite 已登录 Google Flow，且 Flow 界面为简体中文；报 `unsupported_ui_language` 时请用户把 Google 账号显示语言切到简体中文。一条命令完成，读取单行 JSON 即可。脚本内部已执行 Ego Lite 窗口守卫（同目录 `ego_lite_window_guard.py`）并按其 action 处理，调用前不必另跑；还会复用 Flow 里的专用项目（默认“Agent CLI Studio”，环境变量 `FLOW_STUDIO_PROJECT` 或 `--project-name` 可改；打开后读页面上的项目名核对，缓存地址只给同名项目用，对不上就按名字找、找不到就新建）、下载原图、生成预览图。
 
 ## 省 Token 规则（必须遵守）
 
@@ -22,7 +22,7 @@ description: Use when the user wants images or videos from Google Flow (Nano Ban
 
 ```bash
 S=<本 skill 目录>/flow_studio.py   # 例：~/.agents/skills/flow-studio/flow_studio.py
-python3 $S image --prompt "..." [--aspect 16:9] [--count 1] [--model "Nano Banana Pro"] [--ref-image /abs/a.png] [--name 前缀]
+python3 $S image --prompt "..." [--aspect 16:9] [--count 1] [--model "Nano Banana Pro"] [--ref-image /abs/a.png [--keep-layout]] [--name 前缀]
 python3 $S video --prompt "..." [--model "Veo 3.1 - Lite"] [--aspect 16:9|9:16] [--duration 4] [--video-type 帧 --ref-image /abs/首帧.png [--ref-image /abs/尾帧.png]] [--resolution 360p] --max-credits <用户同意的上限>
 python3 $S batch --plan /abs/shots.json --dry-run                 # 含视频时先干跑：0 点，汇总每条与总预估
 python3 $S batch --plan /abs/shots.json --max-total-credits <用户同意的总额> [--skip-existing] [--only s01,s03]
@@ -35,13 +35,20 @@ python3 $S credits
 - **视频参考图有两种用法**：`--video-type 帧` + `--ref-image` = 首帧，再加第 2 张 = 尾帧；默认 `素材` + `--ref-image` = 素材参考图（不是首帧）。
 - 帧模式的 `--dry-run` 会真实上传并核对首/尾帧绑定（结果 `frame_binding[].verified`），不提交不扣点。真跑后自动核对：时长与 `--duration` 相差超过 1.5 秒判 `result_mismatch`；成片首帧与首帧图 SSIM 低于 0.4 判 `first_frame_mismatch`（`files[].first_frame_ssim`；尾帧只给 `last_frame_ssim` 和警告）。两者都会停批量。这两项核对分不出首尾帧和时长都相同的旧视频：同一组首尾帧重跑后，看 `pick_diag.label_seen_before` 或警告“可能拿到了旧视频”，出现就先核对再交付。
 
-`shots.json`：`defaults` 放通用字段，`defaults.image` / `defaults.video` 放按模式的默认值，镜头字段覆盖默认值。相对路径按 plan 所在目录解析；输出默认 `outputs/flow_studio/<plan 文件名>/`。镜头可用字段：`id prompt mode aspect count model thinking video_type resolution duration ref_image name max_credits timeout transport project_url project_name allow_unknown_cost`，拼错会直接报错。
+`shots.json`：`defaults` 放通用字段，`defaults.image` / `defaults.video` 放按模式的默认值，镜头字段覆盖默认值。相对路径按 plan 所在目录解析；输出默认 `outputs/flow_studio/<plan 文件名>/`。镜头可用字段：`id prompt mode aspect count model thinking video_type resolution duration ref_image keep_layout name max_credits timeout transport project_url project_name allow_unknown_cost`，拼错会直接报错。
 
 ```json
 {"defaults": {"mode": "video", "aspect": "16:9", "video": {"model": "Veo 3.1 - Lite"}},
  "shots": [{"id": "s01", "prompt": "..."},
            {"id": "s02", "prompt": "...", "video_type": "帧", "ref_image": "/abs/s02_首帧.png"}]}
 ```
+
+## 项目与参考图核对（硬规则）
+
+- 每次都看结果里的 `project.name`（读自页面）是不是你要的项目；`project.rejected` 表示缓存地址打开后名字对不上、已弃用。
+- 图片模式、视频素材模式的参考图：脚本按唯一文件名在素材面板里点选，确认高亮的是这张再“添加到提示”，并核对输入框附件的素材地址；输入框里不是本次的附件一律移除（Flow 处理完新上传的图后会自动挂进下一个打开项目的页面），提交前再清理核对一次。结果 `ref_attach[].verified` 为 true 才算挂对。新上传的图要等 Flow 处理完（几十秒到几分钟，`ref_upload[].ready_after_s`），带参考图的单张请把工具超时设到 600 秒以上。干跑也会真实挂图核对（0 点）。
+- 改这张图、要保留构图（换背景、换涂装、局部修改）时加 `--keep-layout`（plan 里 `keep_layout: true`）：成品与参考图结构相似度 `files[].ref_ssim` 低于 0.15 判 `ref_mismatch` 并停批量。只借人物或风格的参考（分镜设定图）不加，低于 0.15 只给警告。
+- 出现 `project_mismatch`、`ref_attach_failed`、`composer_not_clean`、`ref_mismatch`，或者 Read preview 发现成品不是照参考图改的：**停下，先查原因并告诉用户**。不要换个项目名、换个提示词或换条路径接着跑。
 
 ## 点数与预算（硬规则）
 
@@ -74,6 +81,9 @@ python3 $S credits
 | `download_failed` | 图已生成，只是下载失败：不要重新生成，把 `images[].media_id` 告诉用户 |
 | `flow_unusual_activity` | Flow 风控，未扣费：停下，至少等几小时再试；不要换提示词或换路径硬刷 |
 | `content_policy` | 改提示词后再试 |
+| `project_mismatch` | 打开的项目名不对（或读不到、或新建后改名失败），未提交、未扣点：把 message 报给用户，确认要用哪个项目再跑 |
+| `ref_attach_failed`、`composer_not_clean` | 参考图没挂对，或输入框里有不是本次的素材，未提交、未扣点：把 message 报给用户，查清再跑，不要硬重试 |
+| `ref_mismatch` | 已生成（图片 0 点），成品和参考图对不上，批量已停：把 preview 和 `ref_attach` 给用户看，查清原因再跑 |
 | `warnings` | 某项设置没生效（如该模型不支持 360p）或张数不足，告诉用户 |
 | `batch` 中途失败 | 已完成的镜头不会重跑；修复后加 `--skip-existing` 续跑 |
 | `result_mismatch`、`result_pick_mismatch`、`first_frame_mismatch` | 已提交、**点数已扣**：不要重跑。把 `pick_diag`（选中了哪张卡）报给用户；成品多半就在专用项目视频栏第一张，先取回核对，再决定是否续跑 |

@@ -207,8 +207,11 @@ The start and end frames you gave, next to the first and last frames of the clip
 | Duration differs from `--duration` by more than 1.5 s | `result_mismatch` | Wrong clip, or the duration setting didn't apply |
 | First frame vs. your start frame, SSIM below 0.4 | `first_frame_mismatch` | The start frame didn't take |
 | Picked card's title existed before the run | warning | Possibly an older clip; check before delivering |
+| Project title read from the page differs from the requested name | `project_mismatch` (before submit) | A cached or given URL points at another project |
+| Reference image in the prompt box isn't the asset you uploaded | `ref_attach_failed` / `composer_not_clean` (before submit) | The picker added a different asset, or something else is attached |
+| Image result vs. reference, SSIM (64×36 gray) below 0.15 | `ref_mismatch` with `--keep-layout`, otherwise a warning | The edit wasn't based on your reference |
 
-Both failures stop a batch. What the agent sees is the 4-frame preview below, not the full video:
+Failures stop a batch. What the agent sees is the 4-frame preview below, not the full video:
 
 <p align="center">
   <img src="docs/assets/preview-sheet.jpg" width="480" alt="Four-frame contact sheet of the generated clip">
@@ -219,7 +222,7 @@ Both failures stop a batch. What the agent sees is the 4-frame preview below, no
 | Environment variable | Purpose | Default |
 |---|---|---|
 | `FLOW_STUDIO_OUT_DIR` | Where downloads go | `./outputs/flow_studio` (current directory) |
-| `FLOW_STUDIO_PROJECT` | Name of the dedicated Flow project | `Agent CLI Studio` |
+| `FLOW_STUDIO_PROJECT` | Name of the dedicated Flow project (checked against the page title on every run) | `Agent CLI Studio` |
 
 State and the upload cache live in `~/.cache/flow_studio/`. Option values have English aliases: `--video-type frames|ingredients`, `--thinking low|medium|high`.
 

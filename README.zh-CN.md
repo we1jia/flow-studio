@@ -207,8 +207,11 @@ flowchart LR
 | 时长与 `--duration` 相差超过 1.5 秒 | `result_mismatch` | 拿错了视频，或时长设置没生效 |
 | 成片首帧与你的首帧 SSIM 低于 0.4 | `first_frame_mismatch` | 首帧没生效 |
 | 选中卡片的标题在生成前就存在 | 警告 | 可能是旧视频，交付前先核对 |
+| 页面上读到的项目名与要求的不一致 | `project_mismatch`（提交前） | 缓存或指定的地址是别的项目 |
+| 输入框里的参考图不是你上传的那张 | `ref_attach_failed` / `composer_not_clean`（提交前） | 素材面板加进了别的图，或输入框里有别的附件 |
+| 图片成品与参考图 SSIM（64×36 灰度）低于 0.15 | 加 `--keep-layout` 时 `ref_mismatch`，否则警告 | 不是照你的参考图改的 |
 
-两种不通过都会让批量停下。Agent 检查时看的是下面这张 4 帧预览，不读整段视频：
+不通过都会让批量停下。Agent 检查时看的是下面这张 4 帧预览，不读整段视频：
 
 <p align="center">
   <img src="docs/assets/preview-sheet.jpg" width="480" alt="生成视频的 4 帧拼图">
@@ -219,7 +222,7 @@ flowchart LR
 | 环境变量 | 作用 | 默认 |
 |---|---|---|
 | `FLOW_STUDIO_OUT_DIR` | 成品下载目录 | 当前目录下的 `outputs/flow_studio` |
-| `FLOW_STUDIO_PROJECT` | Flow 里专用项目的名字 | `Agent CLI Studio` |
+| `FLOW_STUDIO_PROJECT` | Flow 里专用项目的名字（每次打开后按页面上的项目名核对） | `Agent CLI Studio` |
 
 运行状态和上传缓存在 `~/.cache/flow_studio/`。参数值有英文别名：`--video-type frames|ingredients`、`--thinking low|medium|high`。
 
